@@ -77,15 +77,11 @@ def load_settings():
         return {}
 
 
-def save_settings(cfg):
-    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS.write_text(json.dumps(cfg, indent=1))
-
-
 def remember(name, d, g, **extra):
     cfg = load_settings()
     cfg.setdefault("songs", {})[name] = {"d": d, "g": g}
-    save_settings({**cfg, **extra})
+    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS.write_text(json.dumps({**cfg, **extra}, indent=1))
 
 
 def cameras():

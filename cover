@@ -165,6 +165,8 @@ read -r drive wet dry < <(awk -v d="$dist" 'BEGIN{print d*2.4, d/10, 1-d/10}')  
 ref=${inst%/*}/vocals.wav   # the band's own vocal, split out by demucs: the target for tone, space and level
 lufs() { ffmpeg -nostats -hide_banner -i "$1" -af ebur128=framelog=quiet -f null - 2>&1 | awk '$1=="I:"{v=$2} END{print v}'; }
 rms() { ffmpeg -nostats -hide_banner -i "$1" -af "$2,astats=measure_perchannel=RMS_level:measure_overall=none" -f null - 2>&1 | awk '/RMS level dB/{print $NF; exit}'; }
+side="pan=mono|c0=0.5*c0-0.5*c1" mid="pan=mono|c0=0.5*c0+0.5*c1"   # stereo difference / sum of a file
+width() { awk -v s="$(rms "$1" "$side")" -v m="$(rms "$1" "$mid")" 'BEGIN{printf "%.1f", s-m}'; }   # how wide it sounds, dB
 bands=(63 125 250 500 1000 2000 4000 8000 16000)
 shape() {  # level of each octave band relative to the whole signal, all in one ffmpeg pass
   local g="[0]pan=mono|c0=c0,asplit=$(( ${#bands[@]} + 1 ))[t]" i
@@ -218,9 +220,9 @@ ffmpeg -loglevel error -y -i "$vdry" -filter_complex "[0]asplit[a][b];
   [a]asetrate=48278,aresample=48000,atempo=0.994233,adelay=15[l];
   [b]asetrate=47722,aresample=48000,atempo=1.005834,adelay=23[r];
   [l][r]join=inputs=2:channel_layout=stereo,volume=-7dB[o]" -map "[o]" "$vdbl"   # join: amerge chokes on pw-record's unset layout
-refwidth=$(awk -v s="$(rms "$ref" "pan=mono|c0=0.5*c0-0.5*c1")" -v m="$(rms "$ref" "pan=mono|c0=0.5*c0+0.5*c1")" 'BEGIN{printf "%.1f", s-m}')
+refwidth=$(width "$ref")
 read -r dgain wgain < <(awk -v t="$refwidth" \
-  -v w="$(rms "$vwet" "pan=mono|c0=0.5*c0-0.5*c1")" -v b="$(rms "$vdbl" "pan=mono|c0=0.5*c0-0.5*c1")" -v d="$(rms "$vdry" anull)" \
+  -v w="$(rms "$vwet" "$side")" -v b="$(rms "$vdbl" "$side")" -v d="$(rms "$vdry" anull)" \
   'BEGIN{ if (t ~ /inf|nan/) t = -18   # no vocal in the original to measure: a typical width
     t = t > -12 ? -12 : (t < -30 ? -30 : t)   # width target capped: never washed out
     t += 4   # demucs files part of a double under the band, so aim wider to measure like the record (ponytail: fixed allowance)
@@ -271,7 +273,7 @@ if [[ $src == same* ]]; then
     'BEGIN{ want = r + 20 * log(g) / log(10); c = want - (v - b); f = c > 6 ? 6 : (c < -6 ? -6 : c)
       if (c "" ~ /inf|nan/ || v == "") print 0, "?"; else printf "%s %+.1f\n", f, c - f }')   # off = what the capped fix can't reach
   # Grade, from the same split: your vocal's width and tone in the finished mix vs the record's vocal
-  mywidth=$(awk -v s="$(rms "$d/vocals.wav" "pan=mono|c0=0.5*c0-0.5*c1")" -v m="$(rms "$d/vocals.wav" "pan=mono|c0=0.5*c0+0.5*c1")" 'BEGIN{printf "%.1f", s-m}')
+  mywidth=$(width "$d/vocals.wav")
   [[ -n ${refshape-} ]] || refshape=$(shape "$ref")
   tone=$(awk -v r="$refshape" -v m="$(shape "$d/vocals.wav")" -v b="${bands[*]}" 'BEGIN{ n = split(r, R); split(m, M); split(b, B)
     for (i = 1; i <= n; i++) { x = M[i] - R[i]; printf "%s:%+.1f ", (B[i] >= 1000 ? B[i] / 1000 "k" : B[i]), x
