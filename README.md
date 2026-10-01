@@ -67,4 +67,4 @@ Everything lives in `~/covers`, one set per take:
 ## Notes
 
 - Death metal vocals are loud: set your interface gain so your loudest growl doesn't clip. The raw take is kept clean; effects only go on the mix.
-- Covers posted to YouTube usually get a Content ID claim from the label. The video normally stays up; the label gets the ad money.
+- **Posting covers:** the backing track is the original recording with the vocals removed, so YouTube's Content ID will likely match the label's recording, not just the song. The rights holder then decides: monetize (video stays up, they get the ad money, the most common outcome), track, or block. A claim isn't a copyright strike, but don't dispute one without permission: that can escalate to a takedown, which is a strike. If a video gets blocked, you need a backing track you're allowed to use. Not legal advice.
