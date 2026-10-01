@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2329  # the fake ffmpeg/v4l2-ctl/command below are called by cam_format, not directly
+# shellcheck disable=SC2317,SC2329  # (old/new shellcheck name for the same thing) the fake ffmpeg/v4l2-ctl/command below are called by cam_format, not directly
 # Checks cover's camera format picker against fake cameras (CI runs this; no camera needed).
 set -euo pipefail
 eval "$(sed -n '/^biggest()/,/^}$/p' "$(dirname "$0")/cover")"

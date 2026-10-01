@@ -133,7 +133,7 @@ if [[ -z $vox ]]; then
   trap 'cancelled=1; kill $play 2>/dev/null' INT
   wait $play || true
   kill $rec 2>/dev/null; wait $rec || true
-  [[ -n $lyp ]] && { kill $lyp 2>/dev/null; wait $lyp; echo; } || true
+  if [[ -n $lyp ]]; then kill $lyp 2>/dev/null; wait $lyp || true; echo; fi   # wait reports the kill; that's expected
   echo "Recording finished."
   trap - INT
   [[ -n $camp ]] && { kill $camp 2>/dev/null; wait $camp || true; }
