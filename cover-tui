@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""The menu app for `cover` (plain `cover` opens it). Songs -> takes -> record / remix / play / delete / time lyrics.
+Everything real is done by running `cover` and `cover-lyrics`; this only finds files and shows progress.
+  cover-tui --selftest   check the file-matching rules
+"""
+import curses, os, re, select, signal, subprocess, sys, tempfile, time
+from pathlib import Path
+
+COVERS = Path.home() / "covers"
+SONG_DIRS = [(Path.home() / "Music", "**/*"), (Path.home() / "Downloads", "*")]
+AUDIO = {".mp3", ".flac", ".ogg", ".wav"}  # what pw-play can read
+STAMP = r"\d{8}-\d{6}"
+
+
+# ---------- files ----------
+
+def songs():
+    """[(name, track path or None)]: song files, plus songs that only exist as takes (file renamed or moved)."""
+    found = {}
+    for folder, pattern in SONG_DIRS:
+        for f in sorted(folder.glob(pattern)) if folder.is_dir() else []:
+            if f.suffix.lower() in AUDIO and f.is_file():
+                found.setdefault(f.stem, f)
+    for v in COVERS.glob("*-vox-*.wav"):
+        m = re.fullmatch(rf"(.*)-vox-{STAMP}\.wav", v.name)
+        if m:
+            found.setdefault(m[1], None)
+    return sorted(found.items(), key=lambda s: s[0].lower())
+
+
+def takes(name):
+    """Raw takes of a song: their TIME stamps."""
+    return sorted(m[1] for v in COVERS.glob("*-vox-*.wav")
+                  if (m := re.fullmatch(rf"{re.escape(name)}-vox-({STAMP})\.wav", v.name)))
+
+
+def covers(name):
+    """Finished covers of a song, newest first: dicts with take, remix stamp, files, settings, grade summary."""
+    rows = []
+    for mp3 in COVERS.glob("*-cover-*.mp3"):
+        m = re.fullmatch(rf"{re.escape(name)}-cover-({STAMP})(?:-remix-({STAMP}))?\.mp3", mp3.name)
+        if not m:
+            continue
+        grade = mp3.with_name(mp3.name.replace("-cover-", "-grade-", 1)).with_suffix(".txt")
+        lines = grade.read_text().splitlines() if grade.exists() else []
+        rows.append({"take": m[1], "remix": m[2], "mp3": mp3, "mp4": mp3.with_suffix(".mp4"), "grade": grade,
+                     "settings": lines[0].replace("=", "") if lines else "", "summary": lines[1] if len(lines) > 1 else ""})
+    return sorted(rows, key=lambda r: r["remix"] or r["take"], reverse=True)
+
+
+def delete(name, row):
+    """Delete one cover; the take's raw vocals and camera footage go too when it was the take's last cover."""
+    for f in (row["mp3"], row["mp4"], row["grade"]):
+        f.unlink(missing_ok=True)
+    if not any(r["take"] == row["take"] for r in covers(name)):
+        for f in (COVERS / f"{name}-vox-{row['take']}.wav", COVERS / f"{name}-cam-{row['take']}.mkv"):
+            f.unlink(missing_ok=True)
+
+
+def lyrics_state(name):
+    d = COVERS / "lyrics"
+    return "timed" if (d / f"{name}.lrc").exists() else "plain" if (d / f"{name}.txt").exists() else "-"
+
+
+def when(stamp):
+    return time.strftime("%b %d %H:%M", time.strptime(stamp, "%Y%m%d-%H%M%S"))
+
+
+# ---------- screen ----------
+
+class App:
+    def __init__(self, scr):
+        self.scr = scr
+        curses.curs_set(0)
+        scr.keypad(True)
+        self.msg = ""
+
+    def draw(self, title, rows, sel, keys):
+        s = self.scr
+        s.erase()
+        h, w = s.getmaxyx()
+        s.addnstr(0, 0, f" cover  ›  {title}".ljust(w), w, curses.A_REVERSE | curses.A_BOLD)
+        top = max(0, sel - (h - 5))
+        for i, text in enumerate(rows[top:top + h - 4]):
+            s.addnstr(2 + i, 0, f" {text}".ljust(w), w, curses.A_REVERSE if top + i == sel else 0)
+        if not rows:
+            s.addnstr(2, 2, "(nothing here yet)", w - 2, curses.A_DIM)
+        if self.msg:
+            s.addnstr(h - 2, 1, self.msg, w - 2, curses.A_BOLD)
+        s.addnstr(h - 1, 1, keys, w - 2, curses.A_DIM)
+        s.refresh()
+
+    def pick(self, title, rows, keys, sel=0):
+        """List screen: returns (key, index) for any key that isn't navigation."""
+        while True:
+            sel = max(0, min(sel, len(rows) - 1))
+            self.draw(title, rows, sel, keys)
+            k = self.scr.getch()
+            self.msg = ""
+            if k in (curses.KEY_UP, ord("k")):
+                sel -= 1
+            elif k in (curses.KEY_DOWN, ord("j")):
+                sel += 1
+            elif k != curses.KEY_RESIZE:
+                return k, sel
+
+    def form(self, title, fields):
+        """Settings form: fields = [label, value, kind]; kind 'int' (0-10), 'gain' (0.5-2.0) or 'bool'. None = cancelled."""
+        sel = 0
+        while True:
+            rows = [f"{label:<12} {'◀ ' + str(v) + ' ▶' if kind != 'bool' else ('[x] yes' if v else '[ ] no')}"
+                    for label, v, kind in fields]
+            self.draw(title, rows + ["", "Start"], sel if sel < len(fields) else len(rows) + 1,
+                      "↑↓ field   ←→ change   space toggle   Enter start   Esc cancel")
+            k = self.scr.getch()
+            if k == 27:
+                return None
+            if k in (10, 13, curses.KEY_ENTER):
+                return [v for _, v, _ in fields]
+            if k in (curses.KEY_UP, ord("k")):
+                sel = max(0, sel - 1)
+            elif k in (curses.KEY_DOWN, ord("j")):
+                sel = min(len(fields), sel + 1)
+            elif sel < len(fields):
+                label, v, kind = fields[sel]
+                step = {curses.KEY_RIGHT: 1, ord("l"): 1, curses.KEY_LEFT: -1, ord("h"): -1}.get(k, 0)
+                if kind == "int":
+                    v = max(0, min(10, v + step))
+                elif kind == "gain":
+                    v = round(max(0.5, min(2.0, v + step / 10)), 1)
+                elif k in (ord(" "), curses.KEY_LEFT, curses.KEY_RIGHT):
+                    v = not v
+                fields[sel] = [label, v, kind]
+
+    def run(self, title, argv, record=False):
+        """Run cover/cover-lyrics with a progress line. While recording, the terminal is handed over for the lyrics.
+        Returns (exit code, output lines)."""
+        signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl+C is for cover (cancel the take), not for us
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                             preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        log, buf, handed_over, start = [], b"", False, time.time()
+        while True:
+            ready = select.select([p.stdout], [], [], 0.1)[0]
+            chunk = os.read(p.stdout.fileno(), 4096) if ready else b""
+            if ready and not chunk:
+                break
+            buf += chunk
+            *done, buf = re.split(rb"[\r\n]", buf)
+            for line in (l.decode(errors="replace").strip() for l in done):
+                if not line:
+                    continue
+                log.append(line)
+                if record and line.startswith("Headphones on"):
+                    curses.endwin(); handed_over = True
+                    print(f"\033[2J\033[H{line}", flush=True)
+                elif handed_over and (line.startswith("Recording finished") or line.startswith("Take cancelled")):
+                    handed_over = False; self.scr.clear()
+            if not handed_over:
+                status = log[-1] if log else "starting..."
+                spin = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.time() * 10) % 10]
+                self.draw(title, [f"{spin} {status}", "", f"{int(time.time() - start)}s"], -1, "working... (Ctrl+C stops)")
+        rc = p.wait()
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        if handed_over:
+            self.scr.clear()
+        return rc, log
+
+    def report(self, title, rc, log):
+        """After a run: a one-line result, or the last lines of output if it failed."""
+        if rc == 0:
+            self.msg = next((l for l in reversed(log) if l.startswith("Grade:")), "Done.")
+        elif rc == 130 or any(l.startswith("Take cancelled") for l in log):
+            self.msg = "Take cancelled and deleted."
+        else:
+            self.draw(f"{title} failed", log[-12:] or ["(no output)"], -1, "press any key")
+            self.scr.getch()
+            self.msg = "Failed, see above."
+
+    # ---------- screens ----------
+
+    def songs_screen(self):
+        sel = 0
+        while True:
+            lst = songs()
+            rows = [f"{n[:60]:<60} {lyrics_state(n):>6} {len(takes(n)):>4}{'' if t else '  (song file missing)'}"
+                    for n, t in lst]
+            k, sel = self.pick(f"songs  ({'lyrics':>6}, takes on the right)", rows,
+                               "Enter takes   r record   l time lyrics   q quit", sel)
+            if k in (ord("q"), 27):
+                return
+            if not lst:
+                continue
+            name, track = lst[sel]
+            if k in (10, 13, curses.KEY_ENTER):
+                self.takes_screen(name, track)
+            elif k == ord("r"):
+                self.record(name, track)
+            elif k == ord("l"):
+                self.time_lyrics(name, track)
+
+    def takes_screen(self, name, track):
+        sel = 0
+        while True:
+            lst = covers(name)
+            rows = [f"{when(r['remix'] or r['take'])}  {'remix' if r['remix'] else 'take '}  {r['settings'] or '-':<9} "
+                    f"{r['summary']}{'  ▶ video' if r['mp4'].exists() else ''}" for r in lst]
+            k, sel = self.pick(name, rows, "Enter play   a audio only   m remix   x delete   r record   Esc back", sel)
+            if k in (27, ord("b"), curses.KEY_LEFT):
+                return
+            if k == ord("q"):
+                sys.exit()
+            if k == ord("r"):
+                self.record(name, track)
+            if not lst or k not in (10, 13, curses.KEY_ENTER, ord("a"), ord("m"), ord("x")):
+                continue
+            row = lst[sel]
+            if k == ord("a") or (k != ord("m") and k != ord("x") and not row["mp4"].exists()):
+                self.play_audio(row["mp3"])
+            elif k in (10, 13, curses.KEY_ENTER):
+                subprocess.Popen(["ffplay", "-autoexit", "-loglevel", "quiet", "-window_title", name, str(row["mp4"])],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+                self.msg = "Playing in a new window."
+            elif k == ord("m"):
+                d, g = self.settings(row)
+                v = self.form(f"remix {name}", [["distortion", d, "int"], ["gain", g, "gain"], ["video", False, "bool"]])
+                if v:
+                    argv = ["cover", "-r", str(row["mp3"]), "-d", str(v[0]), "-g", str(v[1])] + ([] if v[2] else ["--no-cam"])
+                    self.report("remix", *self.run(f"remixing {name}", argv))
+                    sel = 0
+            elif k == ord("x"):
+                last = sum(r["take"] == row["take"] for r in lst) == 1
+                self.msg = f"Delete this cover{' and its raw recording (last cover of that take)' if last else ''}? y/n"
+                self.draw(name, rows, sel, "")
+                if self.scr.getch() == ord("y"):
+                    delete(name, row)
+                    self.msg = "Deleted."
+                else:
+                    self.msg = ""
+
+    def settings(self, row):
+        m = re.fullmatch(r"d(\d+) g([\d.]+)", row["settings"])
+        return (int(m[1]), float(m[2])) if m else (3, 1.0)
+
+    def record(self, name, track):
+        if not track:
+            self.msg = "The song file is missing (renamed or moved), so it can't be recorded."
+            return
+        v = self.form(f"record {name}", [["distortion", 3, "int"], ["gain", 1.0, "gain"], ["camera", True, "bool"]])
+        if v:
+            argv = ["cover", str(track), "-d", str(v[0]), "-g", str(v[1])] + ([] if v[2] else ["--no-cam"])
+            self.report("take", *self.run(f"recording {name}", argv, record=True))
+
+    def time_lyrics(self, name, track):
+        if not track:
+            self.msg = "The song file is missing (renamed or moved)."
+            return
+        lrc = COVERS / "lyrics" / f"{name}.lrc"
+        if lyrics_state(name) == "-":
+            self.run(f"looking up lyrics for {name}", ["cover-lyrics", "fetch", str(track), str(lrc)])
+        state = lyrics_state(name)
+        if state == "plain" or (state == "timed" and lrc.with_suffix(".txt").exists()):
+            curses.endwin()  # the tap-along needs the whole terminal; Ctrl+C there is for it, not us
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            subprocess.call(["cover-lyrics", "sync", str(track)], preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            input("\nPress Enter to go back...")
+            self.scr.clear()
+            self.msg = "Lyrics timed." if lyrics_state(name) == "timed" else ""
+        else:
+            self.msg = {"timed": "This song already has timed lyrics.", "-": "No lyrics found for this song."}[state]
+
+    def play_audio(self, mp3):
+        p = subprocess.Popen(["pw-play", str(mp3)], stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.scr.timeout(200)
+        while p.poll() is None:
+            self.draw("playing", [f"♪ {mp3.name}"], -1, "any key stops")
+            if self.scr.getch() != -1:
+                p.terminate()
+        self.scr.timeout(-1)
+
+
+def selftest():
+    global COVERS
+    with tempfile.TemporaryDirectory() as d:
+        COVERS = Path(d)
+        for f in ["Song-vox-20260101-120000.wav", "Song-cam-20260101-120000.mkv", "Song-cover-20260101-120000.mp3",
+                  "Song-cover-20260101-120000-remix-20260102-090000.mp3", "Song (live)-vox-20260103-100000.wav",
+                  "Song (live)-cover-20260103-100000.mp3"]:
+            (COVERS / f).touch()
+        (COVERS / "Song-grade-20260101-120000.txt").write_text("d=3 g=1.0\nvocal +0.0 · width -13.2\n")
+        assert takes("Song") == ["20260101-120000"], "a similar song name must not leak in"
+        rows = covers("Song")
+        assert [r["remix"] for r in rows] == ["20260102-090000", None], "newest first, remix recognised"
+        assert rows[1]["settings"] == "d3 g1.0" and rows[1]["summary"].startswith("vocal"), "grade read"
+        delete("Song", rows[0])
+        assert (COVERS / "Song-vox-20260101-120000.wav").exists(), "raw recording stays while a cover is left"
+        delete("Song", covers("Song")[0])
+        assert not (COVERS / "Song-vox-20260101-120000.wav").exists(), "last cover gone -> raw recording gone"
+        assert not (COVERS / "Song-cam-20260101-120000.mkv").exists()
+        assert (COVERS / "Song (live)-vox-20260103-100000.wav").exists(), "other songs untouched"
+    print("selftest ok")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        selftest()
+    else:
+        os.environ.setdefault("ESCDELAY", "25")  # Esc goes back instantly instead of after curses' 1 s wait
+        curses.wrapper(lambda scr: App(scr).songs_screen())

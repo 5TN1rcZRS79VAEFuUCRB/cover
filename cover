@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# usage: cover SONG [options] | cover -r VOX.wav [options]   (cover --help for everything)
+# Plays the original track in your headphones, records the default mic (and webcam), then mixes
+# your vocals over a vocal-free version (demucs, cached in ~/covers/stems) into ~/covers.
+set -euo pipefail
+usage() { cat <<'HELP'
+cover - record a vocal cover (with webcam video and scrolling lyrics)
+
+  cover SONG [options]                  record a take over SONG (mp3, flac, wav...)
+  cover --remix TAKE_FILE [options]     remix an old take without re-recording
+
+While recording you hear the original song; the final mix uses a version with
+the original vocals removed. Ctrl+C cancels and deletes the take.
+
+Options:
+  -d, --dist N       vocal distortion 0-10: 0 clean, 3-5 gritty, 10 fully distorted (default 3)
+  -g, --gain N       vocal volume: 1.0 = same balance as the original record, 1.2 louder, 0.8 quieter
+  -r, --remix FILE   remix a take instead of recording: give any of its files (the cover .mp4)
+  -o, --offset MS    shift vocals earlier by MS milliseconds (default 0, rarely needed)
+      --no-cam       audio only; when remixing, skips the slow video render
+  -h, --help         show this
+
+  e.g.  cover song.flac -d 5
+
+Change distortion (or volume) on a cover you already made:
+  cover -r ~/covers/NAME-cover-TIME.mp4 -d 6 --no-cam
+  --no-cam = quick audio-only preview (mp3). Happy? Run it again without
+  --no-cam to render the video. Your old cover is kept; remixes are new files
+  named NAME-cover-TIME-remix-NOW, and -r works on those too.
+
+Lyrics (saved in ~/covers/lyrics, fetched from lrclib.net):
+  cover-lyrics sync SONG   tap Enter along with the song to time plain lyrics
+                           so they scroll (one time per song)
+
+Files in ~/covers, one set per take:
+  NAME-cover-TIME.mp4 / .mp3   finished video / audio
+  NAME-vox-TIME.wav            raw vocals (use with --remix)
+  NAME-cam-TIME.mkv            raw camera footage
+  stems/                       vocal-free versions of each song, made once
+HELP
+}
+num() { [[ $2 =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "cover: $1 needs a number, got '$2' (see cover --help)" >&2; exit 2; }; }
+dist=3 vgain=1.0 offset=0 vox= take= cam=/dev/video0 track=
+(($#)) || exec cover-tui   # no arguments: the menu app
+while (($#)); do
+  case $1 in
+    -h|--help)   usage; exit 0 ;;
+    -d|--dist)   num "$1" "${2-}"; dist=$2; shift ;;
+    -g|--gain)   num "$1" "${2-}"; vgain=$2; shift ;;
+    -o|--offset) num "$1" "${2-}"; offset=$2; shift ;;
+    -r|--remix)  [[ -f ${2-} ]] || { echo "cover: --remix needs a file from one of your takes" >&2; exit 2; }; vox=$(realpath "$2"); shift ;;
+    --no-cam)    cam= ;;
+    -*)          echo "cover: unknown option $1 (see cover --help)" >&2; exit 2 ;;
+    *)           [[ -z $track ]] || { echo "cover: only one song at a time" >&2; exit 2; }; track=$1 ;;
+  esac
+  shift
+done
+[[ -n $track || -n $vox ]] || { echo "cover: which song? (see cover --help)" >&2; exit 2; }
+[[ -z $track ]] || { [[ -f $track ]] || { echo "cover: no such file: $track" >&2; exit 2; }; track=$(realpath "$track"); }
+awk -v d="$dist" 'BEGIN{exit !(d<=10)}' || { echo "cover: --dist goes from 0 to 10" >&2; exit 2; }
+if [[ -n $vox ]]; then  # remix: any file of the take (cover mp4/mp3, cam mkv, vox wav, or a remix) -> its raw vocals
+  [[ ${vox##*/} =~ ^(.*)-(vox|cover|cam)-([0-9]{8}-[0-9]{6}) ]] ||
+    { echo "cover: --remix needs one of your take files, like NAME-cover-TIME.mp4" >&2; exit 2; }
+  name=${BASH_REMATCH[1]}; take=${BASH_REMATCH[3]}; vox=${vox%/*}/$name-vox-$take.wav
+  [[ -f $vox ]] || { echo "cover: can't find that take's raw vocals (${vox##*/})" >&2; exit 2; }
+else name=$(basename "${track%.*}"); fi
+stamp=$(date +%Y%m%d-%H%M%S)
+cd ~/covers
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT   # every temp file of this run lives here
+raw=$work/raw.mkv vclean=$work/vclean.wav vdry=$work/vdry.wav vwet=$work/vwet.wav vdbl=$work/vdbl.wav
+vproc=$work/vproc.wav vbus=$work/vbus.wav mixw=$work/mixw.wav mixl=$work/mixl.wav sep=$work/sep
+inst=~/covers/stems/htdemucs/$name/no_vocals.wav
+if [[ ! -f $inst ]]; then
+  [[ -n $track ]] || { echo "cover: no saved instrumental for '$name'; give the original song file too" >&2; exit 2; }
+  echo "Removing original vocals (first time for this song)..."; demucs -n htdemucs --two-stems=vocals -o ~/covers/stems "$track"
+  [[ -f $inst ]] || { echo "cover: that song file doesn't match the take '$name'" >&2; exit 2; }
+fi
+
+if [[ -z $vox ]]; then
+  vox=$PWD/$name-vox-$stamp.wav
+  vid=$PWD/$name-cam-$stamp.mkv
+  camp=
+  if [[ -n $cam && -e $cam ]]; then
+    v4l2-ctl -d "$cam" -c exposure_dynamic_framerate=0 2>/dev/null || true   # steady 30fps, don't slow down in dim light
+    # MJPEG copy = no encoding load while recording; wallclock timestamps let us line it up with the song below
+    ffmpeg -loglevel error -nostdin -y -f v4l2 -ts mono2abs -input_format mjpeg -video_size 1920x1080 -framerate 30 \
+      -i "$cam" -copyts -c copy "$raw" & camp=$!
+  fi
+  lyr=~/covers/lyrics/$name.lrc   # fetched once; drop your own .lrc here to override
+  [[ -f $lyr || -f ${lyr%.lrc}.txt ]] || cover-lyrics fetch "$track" "$lyr" || true
+  [[ -f $lyr ]] || lyr=${lyr%.lrc}.txt   # untimed lyrics show as a page until you run cover-lyrics sync
+  echo "Headphones on. Starting in 3s. Ctrl+C cancels and deletes the take."; sleep 3   # also covers the ~1s camera startup
+  t0=$EPOCHREALTIME
+  # 128-sample buffers (2.7ms) instead of pw-cat's 100ms default: near-zero lag, only while recording
+  pw-record --latency 128 --rate 48000 --channels 1 "$vox" & rec=$!
+  pw-play --latency 128 "$track" & play=$!   # reads mp3/flac/ogg/wav (libsndfile); not m4a/opus
+  lyp=; [[ -f $lyr ]] && { cover-lyrics show "$lyr" "$t0" & lyp=$!; }
+  cancelled=
+  trap 'cancelled=1; kill $play 2>/dev/null' INT
+  wait $play || true
+  kill $rec 2>/dev/null; wait $rec || true
+  [[ -n $lyp ]] && { kill $lyp 2>/dev/null; wait $lyp; echo; } || true
+  echo "Recording finished."
+  trap - INT
+  [[ -n $camp ]] && { kill $camp 2>/dev/null; wait $camp || true; }
+  if [[ -n $cancelled ]]; then
+    rm -f "$vox"   # camera footage only lives in $raw (a temp file) until the take is kept
+    echo "Take cancelled and deleted."; exit 130
+  fi
+  if [[ -n $camp ]]; then
+    # cut the video so it starts when the song did, same as the vocal wav (lossless: every MJPEG frame is a keyframe)
+    vstart=$(ffprobe -v error -select_streams v -show_entries stream=start_time -of csv=p=0 "$raw")
+    lead=$(awk -v t="$t0" -v s="$vstart" 'BEGIN{d=t-s; print (d>0?d:0)}')
+    # and shrink it ~10x (raw MJPEG is ~3 GB a take); GPU encoder, CPU fallback if it's unavailable.
+    # yuv420p: the camera's MJPEG is 4:2:2, which NVENC rejects (as "No capable devices found")
+    echo "Shrinking camera footage..."
+    ffmpeg -loglevel error -y -ss "$lead" -i "$raw" -c:v h264_nvenc -preset p5 -cq 23 -pix_fmt yuv420p "$vid" 2>/dev/null ||
+      { echo "  (GPU encoder unavailable, using the CPU: slower)"
+        ffmpeg -loglevel error -y -ss "$lead" -i "$raw" -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p "$vid"; }
+  fi
+else
+  vid=${vox%-vox-*}-cam-${vox##*-vox-}; vid=${vid%.wav}.mkv   # the take's matching video, if it has one
+  [[ -n $cam ]] || vid=   # --no-cam skips the video render: quick audio-only previews
+fi
+
+out="$name-cover-${take:+$take-remix-}$stamp.mp3"   # remixes keep the take's TIME so -r works on them too
+# Vocal chain: offset trims mic latency, compressor evens out growls, then --dist 0-10 distortion:
+# higher = driven harder into a clipper AND more of that dirty signal replacing the clean one.
+echo "Mixing..."
+read -r drive wet dry < <(awk -v d="$dist" 'BEGIN{print d*2.4, d/10, 1-d/10}')   # tuned on a real growl: tone by ~4, then rougher to 10
+ref=${inst%/*}/vocals.wav   # the band's own vocal, split out by demucs: the target for tone, space and level
+lufs() { ffmpeg -nostats -hide_banner -i "$1" -af ebur128=framelog=quiet -f null - 2>&1 | awk '$1=="I:"{v=$2} END{print v}'; }
+rms() { ffmpeg -nostats -hide_banner -i "$1" -af "$2,astats=measure_perchannel=RMS_level:measure_overall=none" -f null - 2>&1 | awk '/RMS level dB/{print $NF; exit}'; }
+bands=(63 125 250 500 1000 2000 4000 8000 16000)
+shape() {  # level of each octave band relative to the whole signal, all in one ffmpeg pass
+  local g="[0]pan=mono|c0=c0,asplit=$(( ${#bands[@]} + 1 ))[t]" i
+  for i in "${!bands[@]}"; do g+="[b$i]"; done
+  g+=";[t]astats=measure_perchannel=RMS_level:measure_overall=none[o]"
+  for i in "${!bands[@]}"; do
+    g+=";[b$i]bandpass=f=${bands[$i]}:t=o:w=1,bandpass=f=${bands[$i]}:t=o:w=1,astats=measure_perchannel=RMS_level:measure_overall=none,anullsink"
+  done
+  ffmpeg -nostats -hide_banner -i "$1" -filter_complex "$g" -map "[o]" -f null - 2>&1 | awk '
+    match($0, /Parsed_astats_([0-9]+)/, m) && /RMS level dB/ { v[m[1] + 0] = $NF }
+    END { n = asorti(v, k, "@ind_num_asc"); for (i = 2; i <= n; i++) printf "%s ", v[k[i]] - v[k[1]] }'
+}
+reflufs=$(lufs "$ref")
+ffmpeg -loglevel error -y -ss "${offset}ms" -i "$vox" -af "highpass=f=80,acompressor=threshold=-20dB:ratio=4:attack=5:release=80:makeup=2" "$vclean"
+# Tone: EQ your clean vocal toward the record's vocal, band by band, before distortion so --dist keeps its character.
+# A second pass after distortion fixes what's left (octave filters overlap, distortion thins lows and air).
+# ponytail: 75% per pass, capped; demucs' vocal stem has some cymbal/guitar bleed a full match would copy.
+eq=
+if awk -v l="$reflufs" 'BEGIN{exit !(l > -40)}'; then   # skip for instrumentals: nothing to match
+  refshape=$(shape "$ref")
+  toward() {  # EQ moving $1's tone 75% toward the record's vocal, max $2 dB per band (+3 more for the 8k+ air);
+              # $3 = "keepbite" leaves 1-4 kHz alone
+    awk -v r="$refshape" -v m="$(shape "$1")" -v b="${bands[*]}" -v c="$2" -v k="${3-}" 'BEGIN{
+      n = split(r, R); split(m, M); split(b, B)
+      for (i = 1; i <= n; i++) { hi = B[i] >= 8000 ? c + 3 : c; g = 0.75 * (R[i] - M[i]); g = g > hi ? hi : (g < -c ? -c : g)
+        if (k == "keepbite" && B[i] >= 1000 && B[i] <= 4000) g = 0
+        printf "equalizer=f=%s:t=o:w=1:g=%.1f,", B[i], g } }'
+  }
+  eq=$(toward "$vclean" 9)
+fi
+chain="[0]${eq}anull"
+if awk -v d="$dist" 'BEGIN{exit !(d>0)}'; then
+  # growls are already noisy, so plain saturation barely shows; the tone shaping is what you hear:
+  # cut mud, push the 1.5k bite hard into a hard clipper, add presence after. Gate = hiss doesn't become buzz.
+  chain+=",asplit[d][w];
+   [w]agate=threshold=-35dB,highpass=f=300,equalizer=f=1500:t=q:w=0.8:g=12,volume=${drive}dB,asoftclip=type=hard,
+      equalizer=f=3000:t=q:w=1:g=3,lowpass=f=7000[x];
+   [d][x]amix=inputs=2:weights='$dry $wet':normalize=0"
+fi
+ffmpeg -loglevel error -y -i "$vclean" -filter_complex "$chain[o]" -map "[o]" "$vdry"
+if [[ -n $eq ]]; then  # second pass: restore lows and air, keep the 1-4 kHz bite --dist added
+  ffmpeg -loglevel error -y -i "$vdry" -af "$(toward "$vdry" 6 keepbite)anull" "$vbus" && mv "$vbus" "$vdry"
+fi
+# Space: stereo room reverb (decaying noise as the impulse response, different per side = width), set so your
+# vocal is as wide as the record's. Dry mono vocals sound pasted on top of the band.
+ir="anoisesrc=d=1.2:c=pink:seed=11:a=0.5,afade=t=out:d=1.2:curve=exp[i1];anoisesrc=d=1.2:c=pink:seed=22:a=0.5,afade=t=out:d=1.2:curve=exp[i2];[i1][i2]amerge=inputs=2,lowpass=f=10000[ir]"
+ffmpeg -loglevel error -y -i "$vdry" -filter_complex "[0]pan=stereo|c0=c0|c1=c0,adelay=25|25[v];$ir;[v][ir]afir[o]" -map "[o]" "$vwet"
+# Doubles: two copies a few ms late and ~10 cents off pitch, panned left/right, 7 dB down. Fakes the double-tracking
+# that makes record vocals wide (reverb alone reads as room, not as a bigger voice).
+ffmpeg -loglevel error -y -i "$vdry" -filter_complex "[0]asplit[a][b];
+  [a]asetrate=48278,aresample=48000,atempo=0.994233,adelay=15[l];
+  [b]asetrate=47722,aresample=48000,atempo=1.005834,adelay=23[r];
+  [l][r]join=inputs=2:channel_layout=stereo,volume=-7dB[o]" -map "[o]" "$vdbl"   # join: amerge chokes on pw-record's unset layout
+refwidth=$(awk -v s="$(rms "$ref" "pan=mono|c0=0.5*c0-0.5*c1")" -v m="$(rms "$ref" "pan=mono|c0=0.5*c0+0.5*c1")" 'BEGIN{printf "%.1f", s-m}')
+read -r dgain wgain < <(awk -v t="$refwidth" \
+  -v w="$(rms "$vwet" "pan=mono|c0=0.5*c0-0.5*c1")" -v b="$(rms "$vdbl" "pan=mono|c0=0.5*c0-0.5*c1")" -v d="$(rms "$vdry" anull)" \
+  'BEGIN{ if (t ~ /inf|nan/) t = -18   # no vocal in the original to measure: a typical width
+    t = t > -12 ? -12 : (t < -30 ? -30 : t)   # width target capped: never washed out
+    t += 4   # demucs files part of a double under the band, so aim wider to measure like the record (ponytail: fixed allowance)
+    dg = b > t + d ? t + d - b : 0            # narrow record (e.g. a dry mono vocal): turn the doubles down to fit
+    left = 10^((t + d) / 10) - 10^((b + dg) / 10)   # width still needed after the doubles, as power
+    g = left > 0 ? 10 * log10(left) - w : -60
+    if (dg "" ~ /inf|nan/) dg = 0
+    print dg, (g "" ~ /inf|nan/) ? -60 : g }')   # silent take / doubles already wide enough: effectively no reverb
+ffmpeg -loglevel error -y -i "$vdry" -i "$vdbl" -i "$vwet" -filter_complex \
+  "[0]pan=stereo|c0=c0|c1=c0[d];[1]volume=${dgain}dB[b];[2]volume=${wgain}dB[w];[d][b][w]amix=inputs=3:normalize=0[o]" -map "[o]" "$vproc"
+# Vocal bus limiter: hold your peaks to the band's punch (~10 dB over average) so the master limiter doesn't
+# squash your voice harder than the band and bury it.
+pre=$(awk -v l="$(lufs "$vproc")" 'BEGIN{print (l ~ /inf|nan/) ? 0 : -18 - l}')
+ffmpeg -loglevel error -y -i "$vproc" -af "volume=${pre}dB,aresample=192000,alimiter=limit=-8dB:level=0:attack=1:release=60,aresample=48000" \
+  -c:a pcm_f32le "$vbus"
+# Level-match so --dist changes tone, not volume, and your vocals sit where the band's own singer sits
+# on the original record; --gain adjusts from there.
+band=$(lufs "$inst")
+read -r rel src < <(awk -v o="$reflufs" -v b="$band" 'BEGIN{r=o-b
+  if (o > -40 && r > -12 && r < 0) print r, "same as the original record"
+  else print -6, "typical death metal balance (couldn'"'"'t measure the original singer)"}')
+gain=$(awk -v b="$band" -v r="$rel" -v v="$(lufs "$vbus")" 'BEGIN{print (v > -60 ? b + r - v : 0)}')   # silent take: leave it
+echo "Vocal level: ${rel} dB vs the band, ${src}$([[ $vgain == 1.0 ]] || echo ", then --gain $vgain")"
+# Final loudness: as loud as the original record (its two stems added back together), so your cover doesn't
+# sound quieter next to the band's. ponytail: kept within -14 (streaming level) to -8 LUFS; one limiter
+# pushed harder than -8 pumps and crunches.
+target=$(ffmpeg -nostats -hide_banner -i "$inst" -i "$ref" -filter_complex "[0][1]amix=inputs=2:normalize=0,ebur128=framelog=quiet" \
+  -f null - 2>&1 | awk '$1=="I:"{l=$2} END{ if (l == "" || l ~ /inf|nan/) l = -11; print (l > -8 ? -8 : (l < -14 ? -14 : l)) }')
+limit() {  # 4x oversampled limiter with headroom for MP3, so nothing clips on playback
+  ffmpeg -loglevel error -y -i "$mixw" -af "volume=${1}dB,aresample=192000,alimiter=limit=-2dB:level=0,aresample=48000" -c:a pcm_f32le "$mixl"
+}
+mix() {  # your vocal at $gain over the band, mastered to $target -> $mixl
+  ffmpeg -loglevel error -y -i "$vbus" -i "$inst" -filter_complex \
+    "[0]volume=${gain}dB,volume=${vgain}[v];[v][1]amix=inputs=2:duration=shortest:normalize=0[o]" \
+    -map "[o]" -c:a pcm_f32le "$mixw"
+  push=$(awk -v t="$target" -v m="$(lufs "$mixw")" 'BEGIN{print t - m}'); limit "$push"
+  push=$(awk -v p="$push" -v t="$target" -v m="$(lufs "$mixl")" 'BEGIN{print p + t - m}'); limit "$push"   # make up what the limiter shaved off
+}
+mix
+# Check the finished mix the way the record was measured: split it with demucs and fix the vocal level by whatever's
+# off. Mastering squashes vocals, and demucs undercounts a vocal inside a dense mix (on the record too), so only a
+# like-for-like comparison lands your voice where the band's sits. ponytail: one correction, +-6 dB max.
+if [[ $src == same* ]]; then
+  echo "Checking your vocal level against the record..."
+  demucs -n htdemucs --two-stems=vocals -o "$sep" "$mixl" >/dev/null 2>&1 || true
+  d=$sep/htdemucs/mixl
+  read -r corr off < <(awk -v r="$rel" -v g="$vgain" -v v="$(lufs "$d/vocals.wav" 2>/dev/null)" -v b="$(lufs "$d/no_vocals.wav" 2>/dev/null)" \
+    'BEGIN{ want = r + 20 * log(g) / log(10); c = want - (v - b); f = c > 6 ? 6 : (c < -6 ? -6 : c)
+      if (c "" ~ /inf|nan/ || v == "") print 0, "?"; else printf "%s %+.1f\n", f, c - f }')   # off = what the capped fix can't reach
+  # Grade, from the same split: your vocal's width and tone in the finished mix vs the record's vocal
+  mywidth=$(awk -v s="$(rms "$d/vocals.wav" "pan=mono|c0=0.5*c0-0.5*c1")" -v m="$(rms "$d/vocals.wav" "pan=mono|c0=0.5*c0+0.5*c1")" 'BEGIN{printf "%.1f", s-m}')
+  [[ -n ${refshape-} ]] || refshape=$(shape "$ref")
+  tone=$(awk -v r="$refshape" -v m="$(shape "$d/vocals.wav")" -v b="${bands[*]}" 'BEGIN{ n = split(r, R); split(m, M); split(b, B)
+    for (i = 1; i <= n; i++) { x = M[i] - R[i]; printf "%s:%+.1f ", (B[i] >= 1000 ? B[i] / 1000 "k" : B[i]), x
+      if (B[i] < 1000 || B[i] > 4000) { t += x < 0 ? -x : x; k++ } }   # average leaves out the 1-4k --dist bite
+    printf "|%.1f", k ? t / k : 0 }')
+  if awk -v c="$corr" 'BEGIN{exit !(c > 0.3 || c < -0.3)}'; then
+    echo "  vocal was $(awk -v c="$corr" 'BEGIN{printf "%.1f dB too %s", (c < 0 ? -c : c), (c > 0 ? "quiet" : "loud")}'), fixing"
+    gain=$(awk -v g="$gain" -v c="$corr" 'BEGIN{print g + c}'); mix
+  fi
+fi
+# The limiter squashes clean (peaky) vocals harder than distorted (flat) ones; a final down-only trim keeps
+# every --dist at the same loudness without ever clipping.
+mgain=$(awk -v t="$target" -v m="$(lufs "$mixl")" 'BEGIN{g=t-m; print (g<0?g:0)}')
+ffmpeg -loglevel error -y -i "$mixl" -af "volume=${mgain}dB" -q:a 2 "$out"
+echo "Loudness: ${target} LUFS$(awk -v t="$target" 'BEGIN{print (t == -8 ? " (as loud as it goes cleanly)" : t == -14 ? " (quiet original; streaming level)" : ", same as the original record")}')"
+grade=${out/-cover-/-grade-}; grade=${grade%.mp3}.txt   # read by the TUI: line 1 settings, line 2 summary
+if [[ $src == same* ]]; then
+  printf 'd=%s g=%s\nvocal %s · width %s (record %s) · tone ±%s\nvocal level fixed by %s dB after the first mix\ntone vs record (dB): %s\n' \
+    "$dist" "$vgain" "$off" "$mywidth" "$refwidth" "${tone##*|}" "$corr" "${tone%|*}" > "$grade"
+else
+  printf 'd=%s g=%s\nno record vocal to compare\n' "$dist" "$vgain" > "$grade"
+fi
+echo "Grade: $(sed -n 2p "$grade")"
+echo "vocals: $vox"; echo "mix:    ~/covers/$out"
+
+if [[ -f $vid ]]; then
+  echo "Rendering video..."
+  # same offset as the vocals so your mouth stays in sync with your voice; constant 30fps for YouTube/players
+  ffmpeg -loglevel error -y -ss "${offset}ms" -i "$vid" -i "$out" -map 0:v -map 1:a \
+    -c:v libx264 -preset fast -crf 20 -pix_fmt yuv420p -fps_mode cfr -r 30 -c:a aac -b:a 320k -shortest "${out%.mp3}.mp4"
+  echo "camera: $vid"; echo "video:  ~/covers/${out%.mp3}.mp4"
+fi

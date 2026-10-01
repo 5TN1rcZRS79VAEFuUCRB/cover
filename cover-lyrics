@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Synced lyrics for `cover`.
+  cover-lyrics fetch <track> <out.lrc>   look the song up on lrclib.net, save timed lyrics
+  cover-lyrics show <file.lrc> <t0>      scroll them karaoke-style, t0 = epoch time the song started
+  cover-lyrics sync <track>              tap Enter along with the song to turn plain lyrics into a timed .lrc
+Only plain lyrics online -> fetch saves <name>.txt, show prints it as a page, sync times it once.
+"""
+import bisect, json, math, os, re, shlex, shutil, signal, subprocess, sys, textwrap, time, urllib.parse, urllib.request
+from pathlib import Path
+
+
+def probe(track, entry):
+    return subprocess.run(["ffprobe", "-v", "error", "-show_entries", entry, "-of", "csv=p=0", track],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def clean(s):
+    return re.sub(r"\s*[(\[][^)\]]*[)\]]", "", s).strip()  # drop "(OFFICIAL)", "[HD]" etc.
+
+
+def searches(artist, title, stem):
+    """Queries to try, most trustworthy first: the tags as-is, then 'A - B' names split both ways round
+    (files are named both 'Artist - Title' and 'Title - Artist'), then free text as a last resort."""
+    tries = [{"artist_name": artist, "track_name": title}] if artist and title else []
+    texts = [clean(t) for t in (title, stem) if t]
+    for text in texts:
+        parts = re.split(r"\s+[-–]\s+", text)
+        if len(parts) >= 2:
+            tries += [{"artist_name": parts[0], "track_name": parts[1]}, {"artist_name": parts[1], "track_name": parts[0]}]
+    tries += [{"q": t} for t in texts]
+    return [dict(t) for t in dict.fromkeys(tuple(t.items()) for t in tries)]  # dedupe, keep order
+
+
+def fetch(track, out):
+    artist, title = probe(track, "format_tags=artist"), probe(track, "format_tags=title")
+    duration = float(probe(track, "format=duration") or 0)
+    ok, reached = [], False
+    for params in searches(artist, title, Path(track).stem):
+        req = urllib.request.Request("https://lrclib.net/api/search?" + urllib.parse.urlencode(params),
+                                     headers={"User-Agent": "cover-script (personal vocal cover recorder)"})
+        try:
+            results, reached = json.load(urllib.request.urlopen(req, timeout=10)), True
+        except OSError:
+            continue
+        # same title can be many songs: a free-text hit only counts if the song length matches
+        ok += [r for r in results if r.get("duration") and ("artist_name" in params or abs(r["duration"] - duration) <= 3)]
+        if any(r.get("syncedLyrics") for r in ok):
+            break
+    if not reached:
+        return print("Couldn't reach lrclib.net; recording without lyrics.")
+    ok.sort(key=lambda r: abs(r["duration"] - duration))  # closest length = same recording, not a live version
+    out = Path(out); out.parent.mkdir(parents=True, exist_ok=True)
+    for key, path in ("syncedLyrics", out), ("plainLyrics", out.with_suffix(".txt")):
+        best = next((r for r in ok if r.get(key)), None)
+        if best:
+            path.write_text(best[key])
+            print(f"Lyrics: {best['artistName']} - {best['trackName']} (saved to {path})")
+            if key == "plainLyrics":
+                print(f"They're untimed, so they'll show as a page. To make them scroll, run once:\n"
+                      f"  cover-lyrics sync {shlex.quote(track)}")
+            return
+    print(f"No lyrics found. Put your own .lrc (timed) or .txt (plain) at {out.with_suffix('.*')} to add them.")
+
+
+def screen():
+    """The terminal itself, so lyrics show even while cover's output is captured (the TUI reads it for progress)."""
+    try:
+        return open("/dev/tty", "w")
+    except OSError:
+        return sys.stdout
+
+
+def size(out):
+    try:
+        return os.get_terminal_size(out.fileno())
+    except OSError:
+        return shutil.get_terminal_size()
+
+
+def show(lrc, t0):
+    out = screen()
+    lines = []
+    for raw in Path(lrc).read_text().splitlines():
+        stamps = re.findall(r"\[(\d+):(\d+(?:\.\d+)?)\]", raw)
+        text = re.sub(r"\[[^\]]*\]", "", raw).strip() or "♪"
+        lines += [(int(m) * 60 + float(s), text) for m, s in stamps]
+    lines.sort()
+    if not lines:  # plain lyrics: no timing, so show the whole thing as columns that fit the terminal
+        return print("\033[H\033[2J" + page(Path(lrc).read_text().splitlines(), *size(out)), end="", flush=True, file=out)
+    times = [t for t, _ in lines]
+    dim, bold, yellow, reset = "\033[2m", "\033[1;97m", "\033[1;93m", "\033[0m"
+    out.write("\033[?25l\033[2J")  # hide cursor while we draw
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(out.write("\033[?25h\033[0m") and out.flush()))  # cover stops us with TERM
+    while True:  # redraw 20x/s so the countdown and bar move smoothly and resizes are picked up
+        now = time.time() - t0
+        width, height = size(out)
+        i = bisect.bisect_right(times, now) - 1  # current line, -1 = intro
+        start = times[i] if i >= 0 else 0.0
+        cur = lines[i][1] if i >= 0 else "♪"
+        nxt_t, nxt = lines[i + 1] if i + 1 < len(lines) else (None, "")
+        rows = []  # (text, colour); every row gets centred
+
+        def add(text, colour=""):
+            rows.extend((part, colour) for part in textwrap.wrap(text, max(10, width - 4)) or [""])
+
+        if cur == "♪" and nxt_t is not None:  # intro / instrumental break: count the vocals in
+            wait = nxt_t - now
+            w = math.ceil(wait)
+            add(f"{w}" if wait <= 3 else f"♪   vocals in {w // 60}:{w % 60:02d}",
+                yellow if wait <= 3 else dim)
+            rows.append(("", ""))
+            add(nxt, bold if wait <= 3 else "")
+            later = [t for _, t in lines[i + 2:i + 4]]
+        else:
+            add(lines[i - 1][1] if i > 0 else "", dim)
+            rows.append(("", ""))
+            add(cur, bold)
+            later = [t for _, t in lines[i + 1:i + 3]]
+        if nxt_t is not None:  # bar fills up until the next line starts
+            bw = min(40, width - 4)
+            filled = int(bw * min(1, (now - start) / max(0.01, nxt_t - start)))
+            rows += [("", ""), ("━" * filled + "─" * (bw - filled), yellow if nxt_t - now <= 1 else dim), ("", "")]
+        for t in later:
+            add(t, dim)
+        top = max(0, (height - len(rows)) // 2)
+        frame = "\n" * top + "\n".join(f"{c}{t.center(width).rstrip()}{reset}\033[K" for t, c in rows[:height])
+        out.write("\033[H" + frame + "\033[J")
+        out.flush()
+        time.sleep(0.05)
+
+
+def page(text, width, height):
+    height -= 1  # keep a line free so nothing scrolls off the top
+    text = [l.rstrip() for l in text if l.strip()]
+    colw = max(map(len, text), default=0) + 3
+    cols = [text[i:i + height] for i in range(0, len(text), height)]
+    fits = len(cols) * colw <= width
+    cols = cols if fits else cols[:max(1, width // colw)]  # too small: show what fits from the start
+    note = "" if fits else "(terminal too small for all the lyrics: make it bigger, or run cover-lyrics sync so they scroll)"
+    rows = ["".join(c[r].ljust(colw) if r < len(c) else "" for c in cols).rstrip()[:width]
+            for r in range(max(map(len, cols), default=0))]
+    return "\n".join(rows) + ("\n" + note[:width] if note else "")
+
+
+def sync(track):
+    track = Path(track).resolve()
+    txt = Path.home() / "covers/lyrics" / (track.stem + ".txt")
+    lines = [l.strip() for l in txt.read_text().splitlines() if l.strip()]
+    input(f"{len(lines)} lines from {txt}\nHeadphones on. Press Enter to start the song, "
+          "then Enter the moment each line starts. Ctrl+C cancels.")
+    player = subprocess.Popen(["pw-play", "--latency", "128", str(track)])
+    t0, stamps = time.time(), []
+    try:
+        for i, line in enumerate(lines):
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            input(f"\033[H\033[2J\n  \033[1;97m{line}\033[0m\n\n  \033[2m{nxt}\033[0m\n\n  (Enter when this line starts)")
+            stamps.append(max(0, time.time() - t0 - 0.2))  # ponytail: fixed 0.2s tap reaction; fix odd lines by hand in the .lrc
+    finally:
+        player.terminate()
+    out = txt.with_suffix(".lrc")
+    out.write_text("".join(f"[{int(t // 60):02d}:{t % 60:05.2f}]{l}\n" for t, l in zip(stamps, lines)))
+    print(f"\nSaved {out}. Your next take of this song will scroll.")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        sys.exit(print(__doc__.strip()))
+    {"fetch": fetch, "show": lambda f, t0: show(f, float(t0)), "sync": sync}[sys.argv[1]](*sys.argv[2:])
