@@ -241,9 +241,9 @@ ffmpeg -loglevel error -y -i "$vproc" -af "volume=${pre}dB,aresample=192000,alim
 # Level-match so --dist changes tone, not volume, and your vocals sit where the band's own singer sits
 # on the original record; --gain adjusts from there.
 band=$(lufs "$inst")
-read -r rel src < <(awk -v o="$reflufs" -v b="$band" 'BEGIN{r=o-b
-  if (o > -40 && r > -12 && r < 0) print r, "same as the original record"
-  else print -6, "typical death metal balance (couldn'"'"'t measure the original singer)"}')
+read -r measured rel src < <(awk -v o="$reflufs" -v b="$band" 'BEGIN{r=o-b   # measured: 1 = the record has a vocal to match
+  if (o > -40 && r > -12 && r < 0) print 1, r, "same as the original record"
+  else print 0, -6, "typical death metal balance (couldn'"'"'t measure the original singer)"}')
 gain=$(awk -v b="$band" -v r="$rel" -v v="$(lufs "$vbus")" 'BEGIN{print (v > -60 ? b + r - v : 0)}')   # silent take: leave it
 echo "Vocal level: ${rel} dB vs the band, ${src}$([[ $vgain == 1.0 ]] || echo ", then --gain $vgain")"
 # Final loudness: as loud as the original record (its two stems added back together), so your cover doesn't
@@ -265,7 +265,7 @@ mix
 # Check the finished mix the way the record was measured: split it with demucs and fix the vocal level by whatever's
 # off. Mastering squashes vocals, and demucs undercounts a vocal inside a dense mix (on the record too), so only a
 # like-for-like comparison lands your voice where the band's sits. ponytail: one correction, +-6 dB max.
-if [[ $src == same* ]]; then
+if ((measured)); then
   echo "Checking your vocal level against the record..."
   demucs -n htdemucs --two-stems=vocals -o "$sep" "$mixl" >/dev/null 2>&1 || true
   d=$sep/htdemucs/mixl
@@ -290,7 +290,7 @@ mgain=$(awk -v t="$target" -v m="$(lufs "$mixl")" 'BEGIN{g=t-m; print (g<0?g:0)}
 ffmpeg -loglevel error -y -i "$mixl" -af "volume=${mgain}dB" -q:a 2 "$out"
 echo "Loudness: ${target} LUFS$(awk -v t="$target" 'BEGIN{print (t == -8 ? " (as loud as it goes cleanly)" : t == -14 ? " (quiet original; streaming level)" : ", same as the original record")}')"
 grade=${out/-cover-/-grade-}; grade=${grade%.mp3}.txt   # read by the TUI: line 1 settings, line 2 summary
-if [[ $src == same* ]]; then
+if ((measured)); then
   printf 'd=%s g=%s\nvocal %s · width %s (record %s) · tone ±%s\nvocal level fixed by %s dB after the first mix\ntone vs record (dB): %s\n' \
     "$dist" "$vgain" "$off" "$mywidth" "$refwidth" "${tone##*|}" "$corr" "${tone%|*}" > "$grade"
 else
