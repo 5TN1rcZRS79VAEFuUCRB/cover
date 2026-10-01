@@ -3,11 +3,23 @@
 Everything real is done by running `cover` and `cover-lyrics`; this only finds files and shows progress.
   cover-tui --selftest   check the file-matching rules
 """
-import curses, os, re, select, signal, subprocess, sys, tempfile, time
+import curses, json, os, re, select, signal, subprocess, sys, tempfile, time
 from pathlib import Path
 
 COVERS = Path.home() / "covers"
-SONG_DIRS = [(Path.home() / "Music", "**/*"), (Path.home() / "Downloads", "*")]
+SETTINGS = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "cover" / "settings"
+
+
+def music_dir():
+    """The Music folder the desktop is configured with (xdg-user-dirs), else ~/Music."""
+    try:
+        d = subprocess.run(["xdg-user-dir", "MUSIC"], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        d = ""
+    return Path(d) if d and Path(d) != Path.home() else Path.home() / "Music"   # it answers $HOME when unset
+
+
+SONG_DIRS = [(music_dir(), "**/*"), (Path.home() / "Downloads", "*")]
 AUDIO = {".mp3", ".flac", ".ogg", ".wav"}  # what pw-play can read
 STAMP = r"\d{8}-\d{6}"
 
@@ -55,6 +67,37 @@ def delete(name, row):
     if not any(r["take"] == row["take"] for r in covers(name)):
         for f in (COVERS / f"{name}-vox-{row['take']}.wav", COVERS / f"{name}-cam-{row['take']}.mkv"):
             f.unlink(missing_ok=True)
+
+
+def load_settings():
+    """What the record form remembers: {"camera": device or None (off), "songs": {name: {"d": .., "g": ..}}}."""
+    try:
+        return json.loads(SETTINGS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(cfg):
+    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS.write_text(json.dumps(cfg, indent=1))
+
+
+def remember(name, d, g, **extra):
+    cfg = load_settings()
+    cfg.setdefault("songs", {})[name] = {"d": d, "g": g}
+    save_settings({**cfg, **extra})
+
+
+def cameras():
+    """[(device, name)] for devices that actually produce video (webcams also expose metadata-only nodes)."""
+    found = []
+    for dev in sorted(Path("/dev").glob("video*"), key=lambda d: int(re.sub(r"\D", "", d.name) or 0)):
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-f", "v4l2", "-list_formats", "all", "-i", str(dev)],
+                             capture_output=True, text=True).stderr
+        if re.search(r"(Raw|Compressed)\s*:", out):
+            label = Path(f"/sys/class/video4linux/{dev.name}/name")
+            found.append((str(dev), label.read_text().strip() if label.exists() else dev.name))
+    return found
 
 
 def lyrics_state(name):
@@ -105,11 +148,12 @@ class App:
                 return k, sel
 
     def form(self, title, fields):
-        """Settings form: fields = [label, value, kind]; kind 'int' (0-10), 'gain' (0.5-2.0) or 'bool'. None = cancelled."""
+        """Settings form: fields = [label, value, kind]; kind 'int' (0-10), 'gain' (0.5-2.0), 'bool',
+        or a list of option names (value = index). Returns the values, or None if cancelled."""
         sel = 0
         while True:
-            rows = [f"{label:<12} {'◀ ' + str(v) + ' ▶' if kind != 'bool' else ('[x] yes' if v else '[ ] no')}"
-                    for label, v, kind in fields]
+            rows = [f"{label:<12} " + ("◀ " + str(kind[v] if isinstance(kind, list) else v) + " ▶" if kind != "bool"
+                                       else "[x] yes" if v else "[ ] no") for label, v, kind in fields]
             self.draw(title, rows + ["", "Start"], sel if sel < len(fields) else len(rows) + 1,
                       "↑↓ field   ←→ change   space toggle   Enter start   Esc cancel")
             k = self.scr.getch()
@@ -124,7 +168,9 @@ class App:
             elif sel < len(fields):
                 label, v, kind = fields[sel]
                 step = {curses.KEY_RIGHT: 1, ord("l"): 1, curses.KEY_LEFT: -1, ord("h"): -1}.get(k, 0)
-                if kind == "int":
+                if isinstance(kind, list):  # choice: cycle through the options
+                    v = (v + step) % len(kind)
+                elif kind == "int":
                     v = max(0, min(10, v + step))
                 elif kind == "gain":
                     v = round(max(0.5, min(2.0, v + step / 10)), 1)
@@ -225,6 +271,7 @@ class App:
                 d, g = self.settings(row)
                 v = self.form(f"remix {name}", [["distortion", d, "int"], ["gain", g, "gain"], ["video", False, "bool"]])
                 if v:
+                    remember(name, v[0], v[1])   # the next take of this song starts here
                     argv = ["cover", "-r", str(row["mp3"]), "-d", str(v[0]), "-g", str(v[1])] + ([] if v[2] else ["--no-cam"])
                     self.report("remix", *self.run(f"remixing {name}", argv))
                     sel = 0
@@ -246,9 +293,16 @@ class App:
         if not track:
             self.msg = "The song file is missing (renamed or moved), so it can't be recorded."
             return
-        v = self.form(f"record {name}", [["distortion", 3, "int"], ["gain", 1.0, "gain"], ["camera", True, "bool"]])
+        cfg, cams = load_settings(), cameras()
+        devs, labels = [None] + [d for d, _ in cams], ["off"] + [f"{n} ({d})" for d, n in cams]
+        last = cfg.get("camera", devs[1] if cams else None)
+        song = cfg.get("songs", {}).get(name, {})
+        v = self.form(f"record {name}", [["distortion", song.get("d", 3), "int"], ["gain", song.get("g", 1.0), "gain"],
+                                         ["camera", devs.index(last) if last in devs else min(1, len(cams)), labels]])
         if v:
-            argv = ["cover", str(track), "-d", str(v[0]), "-g", str(v[1])] + ([] if v[2] else ["--no-cam"])
+            cam = devs[v[2]]
+            remember(name, v[0], v[1], camera=cam)
+            argv = ["cover", str(track), "-d", str(v[0]), "-g", str(v[1])] + (["--cam", cam] if cam else ["--no-cam"])
             self.report("take", *self.run(f"recording {name}", argv, record=True))
 
     def time_lyrics(self, name, track):
@@ -299,6 +353,15 @@ def selftest():
         assert not (COVERS / "Song-vox-20260101-120000.wav").exists(), "last cover gone -> raw recording gone"
         assert not (COVERS / "Song-cam-20260101-120000.mkv").exists()
         assert (COVERS / "Song (live)-vox-20260103-100000.wav").exists(), "other songs untouched"
+        global SETTINGS
+        SETTINGS = Path(d) / "cfg" / "settings"
+        assert load_settings() == {}, "no settings file yet = defaults"
+        remember("Song", 5, 1.2, camera="/dev/video0"); remember("Other", 2, 0.9)
+        cfg = load_settings()
+        assert cfg["camera"] == "/dev/video0" and cfg["songs"] == {"Song": {"d": 5, "g": 1.2}, "Other": {"d": 2, "g": 0.9}}, \
+            "camera remembered overall, distortion/gain per song"
+        remember("Song", 4, 1.0, camera=None)
+        assert load_settings()["camera"] is None and load_settings()["songs"]["Song"]["d"] == 4, "camera off is remembered too"
     print("selftest ok")
 
 

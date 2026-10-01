@@ -17,24 +17,37 @@ Built for death metal covers, but nothing in it is genre-specific except the def
 
 ## Requirements
 
-Arch Linux packages (names may differ elsewhere):
+Linux with PipeWire (the default audio system on current Arch, Debian, Ubuntu and Fedora).
+
+| Distro | Packages |
+|---|---|
+| Arch | `sudo pacman -S ffmpeg pipewire v4l-utils python uv` |
+| Debian / Ubuntu | `sudo apt install ffmpeg pipewire-bin v4l-utils python3 pipx && pipx install uv` |
+| Fedora | enable [RPM Fusion](https://rpmfusion.org/Configuration), then `sudo dnf swap ffmpeg-free ffmpeg --allowerasing && sudo dnf install pipewire-utils v4l-utils python3 uv` (Fedora's own `ffmpeg-free` has no `libx264`, which `cover` uses to render the final video) |
+
+Then Demucs, which removes the original vocals:
 
 ```
-sudo pacman -S ffmpeg pipewire v4l-utils python uv
+# NVIDIA GPU (about 6.5 GB installed):
 uv tool install demucs --python 3.11 --with 'torch<2.9' --with 'torchaudio<2.9' --with soundfile
+# no NVIDIA GPU (about 0.9 GB installed):
+uv tool install demucs --python 3.11 --with 'torch<2.9' --with 'torchaudio<2.9' --with soundfile \
+  --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
 ```
 
-- PipeWire for low-latency playback and recording (`pw-play`, `pw-record`)
-- A V4L2 webcam at `/dev/video0` (optional; `--no-cam` for audio only). Tested with a Logitech C920.
-- An NVIDIA GPU is optional: Demucs and video encoding fall back to the CPU, just slower.
+- **Webcam:** any V4L2 camera; pick it with `--cam /dev/videoN` (or in the menu app), or `--no-cam` for audio only. 1080p MJPEG is used when the camera can do it, otherwise the best format it has. Tested with a Logitech C920.
+- **No NVIDIA GPU?** Everything works, just slower: Demucs runs on the CPU (about 75 s per pass for a 4-minute song on a 12-core CPU), so a first take or a remix takes 1.5 to 2 minutes instead of about 15 seconds. Video is encoded on the CPU too.
+
+`cover` checks for the tools it needs when it starts and names anything missing.
 
 ## Install
 
 ```
 git clone https://github.com/5TN1rcZRS79VAEFuUCRB/cover ~/src/cover
-ln -s ~/src/cover/cover ~/src/cover/cover-lyrics ~/src/cover/cover-tui ~/.local/bin/
-mkdir -p ~/covers
+mkdir -p ~/.local/bin && ln -s ~/src/cover/cover ~/src/cover/cover-lyrics ~/src/cover/cover-tui ~/.local/bin/
 ```
+
+(`~/.local/bin` needs to be on your `PATH`; it is by default on most distros.)
 
 ## Use
 
@@ -46,7 +59,7 @@ cover -r ~/covers/NAME-cover-TIME.mp4 -d 6   # remix a take you already made
 cover --help                   # everything else
 ```
 
-Songs are any `.mp3`, `.flac`, `.ogg` or `.wav` you own (bought downloads, CD rips). The TUI lists songs from `~/Music` and `~/Downloads`.
+Songs are any `.mp3`, `.flac`, `.ogg` or `.wav` you own (bought downloads, CD rips). The menu app lists songs from your Music folder (as set in your desktop's user directories, usually `~/Music`) and `~/Downloads`, and remembers your camera and each song's distortion and gain (in `~/.config/cover/settings`).
 
 Ctrl+C during a take cancels it and deletes it.
 
@@ -68,3 +81,7 @@ Everything lives in `~/covers`, one set per take:
 
 - Death metal vocals are loud: set your interface gain so your loudest growl doesn't clip. The raw take is kept clean; effects only go on the mix.
 - **Posting covers:** the backing track is the original recording with the vocals removed, so YouTube's Content ID will likely match the label's recording, not just the song. The rights holder then decides: monetize (video stays up, they get the ad money, the most common outcome), track, or block. A claim isn't a copyright strike, but don't dispute one without permission: that can escalate to a takedown, which is a strike. If a video gets blocked, you need a backing track you're allowed to use. Not legal advice.
+
+## Status
+
+A personal tool, shared as is. Tested end to end on Arch; the install steps are checked on Debian, Ubuntu and Fedora (in containers, so without audio or a camera). Issues and pull requests are welcome, and get answered when I get to them.

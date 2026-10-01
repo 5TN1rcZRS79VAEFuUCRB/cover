@@ -1,0 +1,17 @@
+name: check
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        run: bash -n cover && bash -n test-cam-format.sh
+      - name: shellcheck
+        run: shellcheck cover test-cam-format.sh
+      - name: Python syntax
+        run: python3 -m py_compile cover-lyrics cover-tui
+      - name: Camera format picker
+        run: ./test-cam-format.sh
+      - name: TUI file rules and settings
+        run: ./cover-tui --selftest

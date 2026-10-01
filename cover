@@ -17,6 +17,7 @@ Options:
   -g, --gain N       vocal volume: 1.0 = same balance as the original record, 1.2 louder, 0.8 quieter
   -r, --remix FILE   remix a take instead of recording: give any of its files (the cover .mp4)
   -o, --offset MS    shift vocals earlier by MS milliseconds (default 0, rarely needed)
+  -c, --cam DEVICE   camera to use (default /dev/video0)
       --no-cam       audio only; when remixing, skips the slow video render
   -h, --help         show this
 
@@ -40,8 +41,16 @@ Files in ~/covers, one set per take:
 HELP
 }
 num() { [[ $2 =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "cover: $1 needs a number, got '$2' (see cover --help)" >&2; exit 2; }; }
-dist=3 vgain=1.0 offset=0 vox= take= cam=/dev/video0 track=
-(($#)) || exec cover-tui   # no arguments: the menu app
+dist=3 vgain=1.0 offset=0 vox='' take='' cam=/dev/video0 track=''
+check_tools() {  # name what's missing up front instead of failing halfway through a take
+  local t
+  for t in ffmpeg ffprobe pw-play pw-record demucs python3 cover-lyrics; do
+    command -v "$t" >/dev/null || { echo "cover: $t not found. It's required: see README \"Install\"" >&2; exit 2; }
+  done
+  command -v v4l2-ctl >/dev/null || echo "cover: note: v4l2-ctl not found (optional: keeps the camera at 30 fps in dim light)" >&2
+  command -v ffplay >/dev/null || echo "cover: note: ffplay not found (optional: plays videos in the menu app)" >&2
+}
+(($#)) || { check_tools; exec cover-tui; }   # no arguments: the menu app
 while (($#)); do
   case $1 in
     -h|--help)   usage; exit 0 ;;
@@ -49,6 +58,7 @@ while (($#)); do
     -g|--gain)   num "$1" "${2-}"; vgain=$2; shift ;;
     -o|--offset) num "$1" "${2-}"; offset=$2; shift ;;
     -r|--remix)  [[ -f ${2-} ]] || { echo "cover: --remix needs a file from one of your takes" >&2; exit 2; }; vox=$(realpath "$2"); shift ;;
+    -c|--cam)    cam=${2:?--cam needs a device like /dev/video0}; shift ;;
     --no-cam)    cam= ;;
     -*)          echo "cover: unknown option $1 (see cover --help)" >&2; exit 2 ;;
     *)           [[ -z $track ]] || { echo "cover: only one song at a time" >&2; exit 2; }; track=$1 ;;
@@ -64,8 +74,9 @@ if [[ -n $vox ]]; then  # remix: any file of the take (cover mp4/mp3, cam mkv, v
   name=${BASH_REMATCH[1]}; take=${BASH_REMATCH[3]}; vox=${vox%/*}/$name-vox-$take.wav
   [[ -f $vox ]] || { echo "cover: can't find that take's raw vocals (${vox##*/})" >&2; exit 2; }
 else name=$(basename "${track%.*}"); fi
+check_tools
 stamp=$(date +%Y%m%d-%H%M%S)
-cd ~/covers
+mkdir -p ~/covers && cd ~/covers
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT   # every temp file of this run lives here
 raw=$work/raw.mkv vclean=$work/vclean.wav vdry=$work/vdry.wav vwet=$work/vwet.wav vdbl=$work/vdbl.wav
 vproc=$work/vproc.wav vbus=$work/vbus.wav mixw=$work/mixw.wav mixl=$work/mixl.wav sep=$work/sep
@@ -76,15 +87,38 @@ if [[ ! -f $inst ]]; then
   [[ -f $inst ]] || { echo "cover: that song file doesn't match the take '$name'" >&2; exit 2; }
 fi
 
+biggest() { tr ' ' '\n' | awk -Fx '$2 <= 1080 {print $1 * $2, $0}' | sort -n | tail -1 | cut -d' ' -f2; }   # largest WxH up to 1080p
+cam_format() {  # best format $1 can do, as "FORMAT WxH"; nothing if it doesn't produce video (e.g. a metadata node)
+  local list mj raw
+  list=$(ffmpeg -hide_banner -f v4l2 -list_formats all -i "$1" 2>&1 || true)
+  mj=$(grep -m1 'Compressed: *mjpeg' <<<"$list" | sed 's/.*: //' || true)
+  raw=$(grep -m1 'Raw *: *yuyv422' <<<"$list" | sed 's/.*: //' || true)
+  if [[ " $mj " == *" 1920x1080 "* ]]; then echo "mjpeg 1920x1080"
+  elif [[ -n $mj ]]; then echo "mjpeg $(biggest <<<"$mj")"
+  elif [[ -n $raw ]]; then  # uncompressed: the largest size that still does >= 24 fps (USB 2 can't carry big raw frames fast)
+    local fast=
+    command -v v4l2-ctl >/dev/null && fast=$(v4l2-ctl -d "$1" --list-formats-ext | awk '
+      /\[[0-9]+\]:/ { f = ($0 ~ /YUYV/) }  f && /Size:/ { s = $3 }  f && /fps/ { gsub(/\(/, "", $4); if ($4 + 0 >= 24) print s }' | biggest)
+    [[ -n $fast ]] || { [[ " $raw " == *" 640x480 "* ]] && fast=640x480 || fast=$(biggest <<<"$raw"); }
+    echo "yuyv422 $fast"
+  fi
+}
+
 if [[ -z $vox ]]; then
   vox=$PWD/$name-vox-$stamp.wav
   vid=$PWD/$name-cam-$stamp.mkv
-  camp=
-  if [[ -n $cam && -e $cam ]]; then
-    v4l2-ctl -d "$cam" -c exposure_dynamic_framerate=0 2>/dev/null || true   # steady 30fps, don't slow down in dim light
-    # MJPEG copy = no encoding load while recording; wallclock timestamps let us line it up with the song below
-    ffmpeg -loglevel error -nostdin -y -f v4l2 -ts mono2abs -input_format mjpeg -video_size 1920x1080 -framerate 30 \
-      -i "$cam" -copyts -c copy "$raw" & camp=$!
+  camp='' cfmt=''
+  if [[ -n $cam ]]; then
+    if [[ -e $cam ]]; then read -r cfmt csize < <(cam_format "$cam") || true; fi
+    if [[ -z $cfmt ]]; then
+      echo "Camera $cam not found or has no usable video format: recording audio only."
+    else
+      [[ $csize == 1920x1080 && $cfmt == mjpeg ]] || echo "Camera: $cfmt $csize (best this camera does)"
+      v4l2-ctl -d "$cam" -c exposure_dynamic_framerate=0 2>/dev/null || true   # steady 30fps, don't slow down in dim light
+      # copy the camera's stream as-is = no encoding load while recording; wallclock timestamps let us line it up below
+      ffmpeg -loglevel error -nostdin -y -f v4l2 -ts mono2abs -input_format "$cfmt" -video_size "$csize" -framerate 30 \
+        -i "$cam" -copyts -c copy "$raw" & camp=$!
+    fi
   fi
   lyr=~/covers/lyrics/$name.lrc   # fetched once; drop your own .lrc here to override
   [[ -f $lyr || -f ${lyr%.lrc}.txt ]] || cover-lyrics fetch "$track" "$lyr" || true
@@ -170,7 +204,7 @@ if awk -v d="$dist" 'BEGIN{exit !(d>0)}'; then
       equalizer=f=3000:t=q:w=1:g=3,lowpass=f=7000[x];
    [d][x]amix=inputs=2:weights='$dry $wet':normalize=0"
 fi
-ffmpeg -loglevel error -y -i "$vclean" -filter_complex "$chain[o]" -map "[o]" "$vdry"
+ffmpeg -loglevel error -y -i "$vclean" -filter_complex "${chain}[o]" -map "[o]" "$vdry"
 if [[ -n $eq ]]; then  # second pass: restore lows and air, keep the 1-4 kHz bite --dist added
   ffmpeg -loglevel error -y -i "$vdry" -af "$(toward "$vdry" 6 keepbite)anull" "$vbus" && mv "$vbus" "$vdry"
 fi
