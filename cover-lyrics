@@ -80,7 +80,7 @@ def fetch(track, out, vocals=None):
     if not reached:
         return print("Couldn't reach lrclib.net; recording without lyrics.")
     ok.sort(key=lambda r: abs(r["duration"] - duration))  # closest length = same recording, not a live version
-    if vocals and Path(vocals).exists() and sum(bool(r.get("syncedLyrics")) for r in ok) > 1:
+    if vocals:
         sung = singing(vocals)  # better: the version whose lines start and stop when the band's singer does
         scores = {lrc: match(lrc, sung) for lrc in {r["syncedLyrics"] for r in ok if r.get("syncedLyrics")}}
         ok.sort(key=lambda r: -scores.get(r.get("syncedLyrics"), 0))  # stable: ties stay closest-length first

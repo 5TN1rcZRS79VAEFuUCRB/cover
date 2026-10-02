@@ -18,7 +18,6 @@ Options:
   -d, --dist N       vocal distortion 0-10: 0 clean, 3-5 gritty, 10 fully distorted (default 3)
   -g, --gain N       vocal volume: 1.0 = same balance as the original record, 1.2 louder, 0.8 quieter
   -r, --remix FILE   remix a take instead of recording: give any of its files (the cover .mp4)
-  -o, --offset MS    shift vocals earlier by MS milliseconds (default 0, rarely needed)
   -c, --cam DEVICE   camera to use (default /dev/video0)
       --no-cam       audio only; when remixing, skips the slow video render
   -h, --help         show this
@@ -34,16 +33,10 @@ Change distortion (or volume) on a cover you already made:
 Lyrics (saved in ~/covers/lyrics, fetched from lrclib.net):
   cover-lyrics sync SONG   tap Enter along with the song to time plain lyrics
                            so they scroll (one time per song)
-
-Files in ~/covers, one set per take:
-  NAME-cover-TIME.mp4 / .mp3   finished video / audio
-  NAME-vox-TIME.wav            raw vocals (use with --remix)
-  NAME-cam-TIME.mkv            raw camera footage
-  stems/                       vocal-free versions of each song, made once
 HELP
 }
 num() { [[ $2 =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "cover: $1 needs a number, got '$2' (see cover --help)" >&2; exit 2; }; }
-dist=3 vgain=1.0 offset=0 vox='' take='' cam=/dev/video0 track=''
+dist=3 vgain=1.0 vox='' take='' cam=/dev/video0 track=''
 check_tools() {  # name what's missing up front instead of failing halfway through a take
   local t
   for t in ffmpeg ffprobe pw-play pw-record demucs python3 cover-lyrics; do
@@ -66,7 +59,6 @@ while (($#)); do
     -h|--help)   usage; exit 0 ;;
     -d|--dist)   num "$1" "${2-}"; dist=$2; shift ;;
     -g|--gain)   num "$1" "${2-}"; vgain=$2; shift ;;
-    -o|--offset) num "$1" "${2-}"; offset=$2; shift ;;
     -r|--remix)  [[ -f ${2-} ]] || { echo "cover: --remix needs a file from one of your takes" >&2; exit 2; }; vox=$(realpath "$2"); shift ;;
     -c|--cam)    cam=${2:?--cam needs a device like /dev/video0}; shift ;;
     --no-cam)    cam= ;;
@@ -165,12 +157,12 @@ if [[ -z $vox ]]; then
         ffmpeg -loglevel error -y -ss "$lead" -i "$raw" -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p "$vid"; }
   fi
 else
-  vid=${vox%-vox-*}-cam-${vox##*-vox-}; vid=${vid%.wav}.mkv   # the take's matching video, if it has one
+  vid=${vox%/*}/$name-cam-$take.mkv   # the take's matching video, if it has one
   [[ -n $cam ]] || vid=   # --no-cam skips the video render: quick audio-only previews
 fi
 
 out="$name-cover-${take:+$take-remix-}$stamp.mp3"   # remixes keep the take's TIME so -r works on them too
-# Vocal chain: offset trims mic latency, compressor evens out growls, then --dist 0-10 distortion:
+# Vocal chain: compressor evens out growls, then --dist 0-10 distortion:
 # higher = driven harder into a clipper AND more of that dirty signal replacing the clean one.
 echo "Mixing..."
 read -r drive wet dry < <(awk -v d="$dist" 'BEGIN{print d*2.4, d/10, 1-d/10}')   # tuned on a real growl: tone by ~4, then rougher to 10
@@ -192,7 +184,7 @@ shape() {  # level of each octave band relative to the whole signal, all in one 
     END { n = asorti(v, k, "@ind_num_asc"); for (i = 2; i <= n; i++) printf "%s ", v[k[i]] - v[k[1]] }'
 }
 reflufs=$(lufs "$ref")
-ffmpeg -loglevel error -y -ss "${offset}ms" -i "$vox" -af "highpass=f=80,acompressor=threshold=-20dB:ratio=4:attack=5:release=80:makeup=2" "$vclean"
+ffmpeg -loglevel error -y -i "$vox" -af "highpass=f=80,acompressor=threshold=-20dB:ratio=4:attack=5:release=80:makeup=2" "$vclean"
 # Tone: EQ your clean vocal toward the record's vocal, band by band, before distortion so --dist keeps its character.
 # A second pass after distortion fixes what's left (octave filters overlap, distortion thins lows and air).
 # ponytail: 75% per pass, capped; demucs' vocal stem has some cymbal/guitar bleed a full match would copy.
@@ -313,8 +305,8 @@ echo "vocals: $vox"; echo "mix:    ~/covers/$out"
 
 if [[ -f $vid ]]; then
   echo "Rendering video..."
-  # same offset as the vocals so your mouth stays in sync with your voice; constant 30fps for YouTube/players
-  ffmpeg -loglevel error -y -ss "${offset}ms" -i "$vid" -i "$out" -map 0:v -map 1:a \
+  # constant 30fps for YouTube/players
+  ffmpeg -loglevel error -y -i "$vid" -i "$out" -map 0:v -map 1:a \
     -c:v libx264 -preset fast -crf 20 -pix_fmt yuv420p -fps_mode cfr -r 30 -c:a aac -b:a 320k -shortest "${out%.mp3}.mp4"
   echo "camera: $vid"; echo "video:  ~/covers/${out%.mp3}.mp4"
 fi

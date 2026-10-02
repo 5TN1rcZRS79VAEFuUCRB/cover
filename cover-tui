@@ -55,7 +55,9 @@ def covers(name):
             continue
         grade = mp3.with_name(mp3.name.replace("-cover-", "-grade-", 1)).with_suffix(".txt")
         lines = grade.read_text().splitlines() if grade.exists() else []
+        dg = re.fullmatch(r"d=(\d+) g=([\d.]+)", lines[0]) if lines else None
         rows.append({"take": m[1], "remix": m[2], "mp3": mp3, "mp4": mp3.with_suffix(".mp4"), "grade": grade,
+                     "d": int(dg[1]) if dg else 3, "g": float(dg[2]) if dg else 1.0,
                      "settings": lines[0].replace("=", "") if lines else "", "summary": lines[1] if len(lines) > 1 else ""})
     return sorted(rows, key=lambda r: r["remix"] or r["take"], reverse=True)
 
@@ -268,8 +270,7 @@ class App:
                                  start_new_session=True)
                 self.msg = "Playing in a new window."
             elif k == ord("m"):
-                d, g = self.settings(row)
-                v = self.form(f"remix {name}", [["distortion", d, "int"], ["gain", g, "gain"], ["video", False, "bool"]])
+                v = self.form(f"remix {name}", [["distortion", row["d"], "int"], ["gain", row["g"], "gain"], ["video", False, "bool"]])
                 if v:
                     remember(name, v[0], v[1])   # the next take of this song starts here
                     argv = ["cover", "-r", str(row["mp3"]), "-d", str(v[0]), "-g", str(v[1])] + ([] if v[2] else ["--no-cam"])
@@ -284,10 +285,6 @@ class App:
                     self.msg = "Deleted."
                 else:
                     self.msg = ""
-
-    def settings(self, row):
-        m = re.fullmatch(r"d(\d+) g([\d.]+)", row["settings"])
-        return (int(m[1]), float(m[2])) if m else (3, 1.0)
 
     def record(self, name, track):
         if not track:
@@ -363,6 +360,7 @@ def selftest():
         rows = covers("Song")
         assert [r["remix"] for r in rows] == ["20260102-090000", None], "newest first, remix recognised"
         assert rows[1]["settings"] == "d3 g1.0" and rows[1]["summary"].startswith("vocal"), "grade read"
+        assert (rows[1]["d"], rows[1]["g"], rows[0]["d"], rows[0]["g"]) == (3, 1.0, 3, 1.0), "remix form starts from the grade (or defaults)"
         delete("Song", rows[0])
         assert (COVERS / "Song-vox-20260101-120000.wav").exists(), "raw recording stays while a cover is left"
         delete("Song", covers("Song")[0])
