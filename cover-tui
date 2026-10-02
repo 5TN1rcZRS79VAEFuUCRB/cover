@@ -227,9 +227,13 @@ class App:
             rows = [f"{n[:60]:<60} {lyrics_state(n):>6} {len(takes(n)):>4}{'' if t else '  (song file missing)'}"
                     for n, t in lst]
             k, sel = self.pick(f"songs  ({'lyrics':>6}, takes on the right)", rows,
-                               "Enter takes   r record   l time lyrics   q quit", sel)
+                               "Enter takes   r record   l time lyrics   d download   q quit", sel)
             if k in (ord("q"), 27):
                 return
+            if k == ord("d"):
+                got = self.download()
+                sel = next((i for i, (n, _) in enumerate(songs()) if n == got), sel)
+                continue
             if not lst:
                 continue
             name, track = lst[sel]
@@ -300,6 +304,22 @@ class App:
             remember(name, v[0], v[1], camera=cam)
             argv = ["cover", str(track), "-d", str(v[0]), "-g", str(v[1])] + (["--cam", cam] if cam else ["--no-cam"])
             self.report("take", *self.run(f"recording {name}", argv, record=True))
+
+    def download(self):
+        """Ask for a link and download the song with `cover --get`. Returns the new song's name, or None."""
+        self.draw("download a song", ["Paste a YouTube link (or any site yt-dlp knows) and press Enter:", "", ""], -1,
+                  "Enter download   Enter on an empty line cancels")
+        curses.echo(); curses.curs_set(1)
+        url = self.scr.getstr(4, 2, 1000).decode(errors="replace").strip()
+        curses.noecho(); curses.curs_set(0)
+        if not url:
+            return None
+        rc, log = self.run("downloading", ["cover", "--get", url])
+        if rc:
+            return self.report("download", rc, log)
+        name = next(Path(l).stem for l in reversed(log) if Path(l).is_file())   # cover --get prints the file's path
+        self.msg = f"Downloaded: {name}"
+        return name
 
     def time_lyrics(self, name, track):
         if not track:

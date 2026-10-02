@@ -7,6 +7,8 @@ usage() { cat <<'HELP'
 cover - record a vocal cover (with webcam video and scrolling lyrics)
 
   cover SONG [options]                  record a take over SONG (mp3, flac, wav...)
+  cover URL [options]                   download the song (YouTube etc., via yt-dlp), then record
+  cover --get URL                       just download it into ~/Downloads (the menu app lists it)
   cover --remix TAKE_FILE [options]     remix an old take without re-recording
 
 While recording you hear the original song; the final mix uses a version with
@@ -50,6 +52,14 @@ check_tools() {  # name what's missing up front instead of failing halfway throu
   command -v v4l2-ctl >/dev/null || echo "cover: note: v4l2-ctl not found (optional: keeps the camera at 30 fps in dim light)" >&2
   command -v ffplay >/dev/null || echo "cover: note: ffplay not found (optional: plays videos in the menu app)" >&2
 }
+get_song() {  # download a song with yt-dlp into ~/Downloads (where the menu app looks) and print its path
+  command -v yt-dlp >/dev/null || { echo "cover: yt-dlp not found. It's needed for links: see README \"Requirements\"" >&2; exit 2; }
+  echo "Downloading $1..." >&2
+  # flac: the download is already lossy, don't lose more re-encoding it; tags (artist, title) help the lyrics lookup
+  # its output goes to stderr (as progress), only the file's path to stdout (via fd 3)
+  yt-dlp --no-playlist -x --audio-format flac --embed-metadata --newline \
+    -o "$HOME/Downloads/%(title)s.%(ext)s" --print-to-file after_move:filepath /dev/fd/3 "$1" 3>&1 >&2
+}
 (($#)) || { check_tools; exec cover-tui; }   # no arguments: the menu app
 while (($#)); do
   case $1 in
@@ -60,12 +70,14 @@ while (($#)); do
     -r|--remix)  [[ -f ${2-} ]] || { echo "cover: --remix needs a file from one of your takes" >&2; exit 2; }; vox=$(realpath "$2"); shift ;;
     -c|--cam)    cam=${2:?--cam needs a device like /dev/video0}; shift ;;
     --no-cam)    cam= ;;
+    --get)       get_song "${2:?--get needs a link}"; exit ;;
     -*)          echo "cover: unknown option $1 (see cover --help)" >&2; exit 2 ;;
     *)           [[ -z $track ]] || { echo "cover: only one song at a time" >&2; exit 2; }; track=$1 ;;
   esac
   shift
 done
 [[ -n $track || -n $vox ]] || { echo "cover: which song? (see cover --help)" >&2; exit 2; }
+[[ ! $track =~ ^https?:// ]] || track=$(get_song "$track")
 [[ -z $track ]] || { [[ -f $track ]] || { echo "cover: no such file: $track" >&2; exit 2; }; track=$(realpath "$track"); }
 awk -v d="$dist" 'BEGIN{exit !(d<=10)}' || { echo "cover: --dist goes from 0 to 10" >&2; exit 2; }
 if [[ -n $vox ]]; then  # remix: any file of the take (cover mp4/mp3, cam mkv, vox wav, or a remix) -> its raw vocals

@@ -35,6 +35,7 @@ uv tool install demucs --python 3.11 --with 'torch<2.9' --with 'torchaudio<2.9' 
   --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
 ```
 
+- **Links instead of files (optional):** [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`sudo pacman -S yt-dlp`, or `pipx install yt-dlp`; distro packages elsewhere are often too old for YouTube).
 - **Webcam:** any V4L2 camera; pick it with `--cam /dev/videoN` (or in the menu app), or `--no-cam` for audio only. 1080p MJPEG is used when the camera can do it, otherwise the best format it has. Tested with a Logitech C920.
 - **No NVIDIA GPU?** Everything works, just slower: Demucs runs on the CPU (about 75 s per pass for a 4-minute song on a 12-core CPU), so a first take or a remix takes 1.5 to 2 minutes instead of about 15 seconds. Video is encoded on the CPU too.
 
@@ -55,11 +56,13 @@ mkdir -p ~/.local/bin && ln -s ~/src/cover/cover ~/src/cover/cover-lyrics ~/src/
 cover                          # the menu app: songs, takes, record, remix, play, delete, time lyrics
 cover song.flac                # record a take (distortion 3 by default)
 cover song.flac -d 0 --no-cam  # clean, audio only
+cover 'https://youtu.be/…'     # download the song into ~/Downloads (yt-dlp), then record
+cover --get 'https://youtu.be/…'   # just download it (or press d in the menu app)
 cover -r ~/covers/NAME-cover-TIME.mp4 -d 6   # remix a take you already made
 cover --help                   # everything else
 ```
 
-Songs are any `.mp3`, `.flac`, `.ogg` or `.wav` you own (bought downloads, CD rips). The menu app lists songs from your Music folder (as set in your desktop's user directories, usually `~/Music`) and `~/Downloads`, and remembers your camera and each song's distortion and gain (in `~/.config/cover/settings`).
+Songs are any `.mp3`, `.flac`, `.ogg` or `.wav` you own (bought downloads, CD rips), or a link yt-dlp can download (saved as `.flac` in `~/Downloads`). The menu app lists songs from your Music folder (as set in your desktop's user directories, usually `~/Music`) and `~/Downloads`, and remembers your camera and each song's distortion and gain (in `~/.config/cover/settings`).
 
 Ctrl+C during a take cancels it and deletes it.
 
