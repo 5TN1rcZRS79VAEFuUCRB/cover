@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Synced lyrics for `cover`.
-  cover-lyrics fetch <track> <out.lrc>   look the song up on lrclib.net, save timed lyrics
+  cover-lyrics fetch <track> <out.lrc> [vocals.wav]
+                                         look the song up on lrclib.net, save timed lyrics (with the song's
+                                         isolated vocals, pick the version whose timing matches the singing)
   cover-lyrics show <file.lrc> <t0>      scroll them karaoke-style, t0 = epoch time the song started
   cover-lyrics sync <track>              tap Enter along with the song to turn plain lyrics into a timed .lrc
 Only plain lyrics online -> fetch saves <name>.txt, show prints it as a page, sync times it once.
 """
-import bisect, json, math, os, re, shlex, shutil, signal, subprocess, sys, textwrap, time, urllib.parse, urllib.request
+import array, bisect, json, math, os, re, shlex, shutil, signal, subprocess, sys, textwrap, time, urllib.parse, urllib.request
 from pathlib import Path
 
 
@@ -31,11 +33,42 @@ def searches(artist, title, stem):
     return [dict(t) for t in dict.fromkeys(tuple(t.items()) for t in tries)]  # dedupe, keep order
 
 
-def fetch(track, out):
+def stamped(lrc):
+    """[(seconds, text)] of an .lrc, sorted; a line with several stamps is sung several times."""
+    lines = []
+    for raw in lrc.splitlines():
+        text = re.sub(r"\[[^\]]*\]", "", raw).strip()
+        lines += [(int(m) * 60 + float(s), text) for m, s in re.findall(r"\[(\d+):(\d+(?:\.\d+)?)\]", raw)]
+    return sorted(lines)
+
+
+def singing(vocals):
+    """Whether the isolated vocal is singing, per quarter second: within 20 dB of its loud parts."""
+    pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", vocals, "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
+                         capture_output=True).stdout
+    a = array.array("h", pcm[:len(pcm) // 2 * 2])
+    rms = [math.sqrt(sum(x * x for x in a[i:i + 2000]) / 2000) for i in range(0, len(a) - 1999, 2000)]
+    loud = sorted(rms)[int(len(rms) * 0.95)] if rms else 0
+    return [r > loud / 10 for r in rms]
+
+
+def match(lrc, sung):
+    """How well an .lrc's timing fits the singing (F1): a line counts as sung from its stamp to the next, at most 8 s."""
+    lines = stamped(lrc)
+    shown = [False] * len(sung)
+    for (t, text), nxt in zip(lines, [t for t, _ in lines[1:]] + [math.inf]):
+        if text:
+            for k in range(int(t * 4), min(len(shown), int(min(nxt, t + 8) * 4))):
+                shown[k] = True
+    both = sum(a and b for a, b in zip(shown, sung))
+    return 2 * both / max(1, sum(shown) + sum(sung))
+
+
+def fetch(track, out, vocals=None):
     artist, title = probe(track, "format_tags=artist"), probe(track, "format_tags=title")
     duration = float(probe(track, "format=duration") or 0)
     ok, reached = [], False
-    for params in searches(artist, title, Path(track).stem):
+    for params in searches(artist, title, Path(track).stem):  # all of them: lrclib often has several versions, some missing verses
         req = urllib.request.Request("https://lrclib.net/api/search?" + urllib.parse.urlencode(params),
                                      headers={"User-Agent": "cover-script (personal vocal cover recorder)"})
         try:
@@ -44,11 +77,13 @@ def fetch(track, out):
             continue
         # same title can be many songs: a free-text hit only counts if the song length matches
         ok += [r for r in results if r.get("duration") and ("artist_name" in params or abs(r["duration"] - duration) <= 3)]
-        if any(r.get("syncedLyrics") for r in ok):
-            break
     if not reached:
         return print("Couldn't reach lrclib.net; recording without lyrics.")
     ok.sort(key=lambda r: abs(r["duration"] - duration))  # closest length = same recording, not a live version
+    if vocals and Path(vocals).exists() and sum(bool(r.get("syncedLyrics")) for r in ok) > 1:
+        sung = singing(vocals)  # better: the version whose lines start and stop when the band's singer does
+        scores = {lrc: match(lrc, sung) for lrc in {r["syncedLyrics"] for r in ok if r.get("syncedLyrics")}}
+        ok.sort(key=lambda r: -scores.get(r.get("syncedLyrics"), 0))  # stable: ties stay closest-length first
     out = Path(out); out.parent.mkdir(parents=True, exist_ok=True)
     for key, path in ("syncedLyrics", out), ("plainLyrics", out.with_suffix(".txt")):
         best = next((r for r in ok if r.get(key)), None)
@@ -79,12 +114,7 @@ def size(out):
 
 def show(lrc, t0):
     out = screen()
-    lines = []
-    for raw in Path(lrc).read_text().splitlines():
-        stamps = re.findall(r"\[(\d+):(\d+(?:\.\d+)?)\]", raw)
-        text = re.sub(r"\[[^\]]*\]", "", raw).strip() or "♪"
-        lines += [(int(m) * 60 + float(s), text) for m, s in stamps]
-    lines.sort()
+    lines = [(t, text or "♪") for t, text in stamped(Path(lrc).read_text())]
     if not lines:  # plain lyrics: no timing, so show the whole thing as columns that fit the terminal
         return print("\033[H\033[2J" + page(Path(lrc).read_text().splitlines(), *size(out)), end="", flush=True, file=out)
     times = [t for t, _ in lines]

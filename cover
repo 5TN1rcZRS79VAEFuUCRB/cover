@@ -133,7 +133,7 @@ if [[ -z $vox ]]; then
     fi
   fi
   lyr=~/covers/lyrics/$name.lrc   # fetched once; drop your own .lrc here to override
-  [[ -f $lyr || -f ${lyr%.lrc}.txt ]] || cover-lyrics fetch "$track" "$lyr" || true
+  [[ -f $lyr || -f ${lyr%.lrc}.txt ]] || cover-lyrics fetch "$track" "$lyr" "${inst%/*}/vocals.wav" || true
   [[ -f $lyr ]] || lyr=${lyr%.lrc}.txt   # untimed lyrics show as a page until you run cover-lyrics sync
   echo "Headphones on. Starting in 3s. Ctrl+C cancels and deletes the take."; sleep 3   # also covers the ~1s camera startup
   t0=$EPOCHREALTIME
