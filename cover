@@ -130,11 +130,18 @@ if [[ -z $vox ]]; then
   [[ -f $lyr || -f ${lyr%.lrc}.txt ]] || cover-lyrics fetch "$track" "$lyr" "${inst%/*}/vocals.wav" || true
   [[ -f $lyr || ! -f ${lyr%.lrc}.txt ]] || cover-lyrics time "${lyr%.lrc}.txt" "${inst%/*}/vocals.wav" || true
   [[ -f $lyr ]] || lyr=${lyr%.lrc}.txt   # still untimed: shown as a page
+  # Count-in: 4 clicks (first one higher), the song coming in where the 5th would, so a song that starts at full
+  # speed doesn't catch you cold. One file with the song, so the clicks are exactly in time with its start.
+  # ponytail: fixed 120 bpm; tempo detection was wrong on 1 of 4 songs with known tempos (Evisceration Plague 128 vs 80)
+  bt=0.5 countin=2
+  fmt=aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo
+  ffmpeg -loglevel error -y -f lavfi -i "aevalsrc='0.4*sin(2*PI*if(lt(t,$bt),2000,1500)*t)*exp(-60*mod(t,$bt))':d=$countin:s=48000" \
+    -i "$track" -filter_complex "[0]${fmt}[c];[1]${fmt}[s];[c][s]concat=n=2:v=0:a=1" "$work/play.wav"
   echo "Headphones on. Starting in 3s. Ctrl+C cancels and deletes the take."; sleep 3   # also covers the ~1s camera startup
-  t0=$EPOCHREALTIME
+  t0=$(awk -v n="$EPOCHREALTIME" -v c="$countin" 'BEGIN{printf "%.6f", n + c}')   # when the song itself starts
   # 128-sample buffers (2.7ms) instead of pw-cat's 100ms default: near-zero lag, only while recording
   pw-record --latency 128 --rate 48000 --channels 1 "$vox" & rec=$!
-  pw-play --latency 128 "$track" & play=$!   # reads mp3/flac/ogg/wav (libsndfile); not m4a/opus
+  pw-play --latency 128 "$work/play.wav" & play=$!
   lyp=; [[ -f $lyr ]] && { cover-lyrics show "$lyr" "$t0" & lyp=$!; }
   cancelled=
   trap 'cancelled=1; kill $play 2>/dev/null' INT
@@ -148,6 +155,7 @@ if [[ -z $vox ]]; then
     rm -f "$vox"   # camera footage only lives in $raw (a temp file) until the take is kept
     echo "Take cancelled and deleted."; exit 130
   fi
+  ffmpeg -loglevel error -y -i "$vox" -af "atrim=start=$countin" "$work/vox.wav" && mv "$work/vox.wav" "$vox"   # drop the count-in
   if [[ -n $camp ]]; then
     # cut the video so it starts when the song did, same as the vocal wav (lossless: every MJPEG frame is a keyframe)
     vstart=$(ffprobe -v error -select_streams v -show_entries stream=start_time -of csv=p=0 "$raw")

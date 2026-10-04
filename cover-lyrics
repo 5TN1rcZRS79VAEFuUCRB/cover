@@ -151,7 +151,7 @@ def show(lrc, t0):
             later = [t for _, t in lines[i + 1:i + 3]]
         if nxt_t is not None:  # bar fills up until the next line starts
             bw = min(40, width - 4)
-            filled = int(bw * min(1, (now - start) / max(0.01, nxt_t - start)))
+            filled = int(bw * max(0, min(1, (now - start) / max(0.01, nxt_t - start))))
             rows += [("", ""), ("━" * filled + "─" * (bw - filled), yellow if nxt_t - now <= 1 else dim), ("", "")]
         for t in later:
             add(t, dim)

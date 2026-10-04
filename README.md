@@ -7,6 +7,7 @@ Built for death metal covers, but nothing in it is genre-specific except the def
 ## What it does
 
 - **Hear the original, keep only yours.** You sing along to the full song; the final mix uses an instrumental made with [Demucs](https://github.com/adefossez/demucs) (done once per song, cached).
+- **A count-in**: four clicks before the song starts, so songs that open at full speed don't catch you cold (the lyrics count down with them; the clicks aren't in the take).
 - **Webcam video**, lined up with the audio, shrunk on the GPU (NVENC) right after the take.
 - **Scrolling synced lyrics** from [LRCLIB](https://lrclib.net), with a countdown into each vocal entry. Songs with only plain lyrics are timed automatically on the first take, by lining the words up with the record's own vocal (torchaudio's forced aligner, which comes with Demucs; a 1.2 GB model is downloaded the first time). If that doesn't fit well enough they show as a page, and you can time them by hand with a tap-along (`l` in the menu app, or `cover-lyrics sync`).
 - **Sounds like the record.** Your vocal is matched to the band's own isolated vocal: tone (EQ, two passes), width (stereo doubles + room reverb), level, and the whole mix to the record's loudness. After mixing, it splits its own result with Demucs and corrects the vocal level against the record measured the same way.
