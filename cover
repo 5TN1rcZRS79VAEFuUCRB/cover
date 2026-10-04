@@ -87,9 +87,14 @@ work=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$work"' EX
 raw=$work/raw.mkv vclean=$work/vclean.wav vdry=$work/vdry.wav vwet=$work/vwet.wav vdbl=$work/vdbl.wav
 vproc=$work/vproc.wav vbus=$work/vbus.wav mixw=$work/mixw.wav mixl=$work/mixl.wav sep=$work/sep
 inst=~/covers/stems/htdemucs/$name/no_vocals.wav
+# Stems are float so they keep the record's true level: demucs' default scales them down when a loud master's peaks
+# go over full scale, and every cover then came out 1-2.5 dB quieter than the record. Older 16-bit stems get redone.
+[[ -z $track || ! -f $inst || $(ffprobe -v error -show_entries stream=sample_fmt -of csv=p=0 "$inst") == flt ]] ||
+  rm -f "$inst"
 if [[ ! -f $inst ]]; then
   [[ -n $track ]] || { echo "cover: no saved instrumental for '$name'; give the original song file too" >&2; exit 2; }
-  echo "Removing original vocals (first time for this song)..."; demucs -n htdemucs --two-stems=vocals -o ~/covers/stems "$track"
+  echo "Removing original vocals (once per song)..."
+  demucs -n htdemucs --two-stems=vocals --float32 --clip-mode none -o ~/covers/stems "$track"
   [[ -f $inst ]] || { echo "cover: that song file doesn't match the take '$name'" >&2; exit 2; }
 fi
 
@@ -256,7 +261,7 @@ ffmpeg -loglevel error -y -i "$vproc" -af "volume=${pre}dB,aresample=192000,alim
 # on the original record; --gain adjusts from there.
 band=$(lufs "$inst")
 read -r measured rel src < <(awk -v o="$reflufs" -v b="$band" 'BEGIN{r=o-b   # measured: 1 = the record has a vocal to match
-  if (o > -40 && r > -12 && r < 0) print 1, r, "same as the original record"
+  if (o > -40 && r > -20 && r < 0) print 1, r, "same as the original record"   # buried 90s mixes sit ~-12.5
   else print 0, -6, "typical death metal balance (couldn'"'"'t measure the original singer)"}')
 gain=$(awk -v b="$band" -v r="$rel" -v v="$(lufs "$vbus")" 'BEGIN{print (v > -60 ? b + r - v : 0)}')   # silent take: leave it
 echo "Vocal level: ${rel} dB vs the band, ${src}$([[ $vgain == 1.0 ]] || echo ", then --gain $vgain")"
