@@ -81,7 +81,9 @@ else name=$(basename "${track%.*}"); fi
 check_tools
 stamp=$(date +%Y%m%d-%H%M%S)
 mkdir -p ~/covers && cd ~/covers
-work=$(mktemp -d); trap 'rm -rf "$work"' EXIT   # every temp file of this run lives here
+# every temp file of this run lives here; stop any player/recorder/camera left running if we exit early,
+# or the camera keeps filling /tmp (RAM) and holds the menu app's pipe open so it waits forever
+work=$(mktemp -d); trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$work"' EXIT
 raw=$work/raw.mkv vclean=$work/vclean.wav vdry=$work/vdry.wav vwet=$work/vwet.wav vdbl=$work/vdbl.wav
 vproc=$work/vproc.wav vbus=$work/vbus.wav mixw=$work/mixw.wav mixl=$work/mixl.wav sep=$work/sep
 inst=~/covers/stems/htdemucs/$name/no_vocals.wav
@@ -136,11 +138,11 @@ if [[ -z $vox ]]; then
   cancelled=
   trap 'cancelled=1; kill $play 2>/dev/null' INT
   wait $play || true
-  kill $rec 2>/dev/null; wait $rec || true
-  if [[ -n $lyp ]]; then kill $lyp 2>/dev/null; wait $lyp || true; echo; fi   # wait reports the kill; that's expected
+  kill $rec 2>/dev/null || true; wait $rec || true
+  if [[ -n $lyp ]]; then kill $lyp 2>/dev/null || true; wait $lyp || true; echo; fi   # plain lyrics have already exited
   echo "Recording finished."
   trap - INT
-  [[ -n $camp ]] && { kill $camp 2>/dev/null; wait $camp || true; }
+  [[ -n $camp ]] && { kill $camp 2>/dev/null || true; wait $camp || true; }
   if [[ -n $cancelled ]]; then
     rm -f "$vox"   # camera footage only lives in $raw (a temp file) until the take is kept
     echo "Take cancelled and deleted."; exit 130
