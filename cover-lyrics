@@ -116,7 +116,7 @@ def show(lrc, t0):
     out = screen()
     lines = [(t, text or "♪") for t, text in stamped(Path(lrc).read_text())]
     if not lines:  # plain lyrics: no timing, so show the whole thing as columns that fit the terminal
-        return print("\033[H\033[2J" + page(Path(lrc).read_text().splitlines(), *size(out)), end="", flush=True, file=out)
+        return print("\033[H\033[2J" + page(Path(lrc).read_text().splitlines(), *size(out), Path(lrc).stem), end="", flush=True, file=out)
     times = [t for t, _ in lines]
     dim, bold, yellow, reset = "\033[2m", "\033[1;97m", "\033[1;93m", "\033[0m"
     out.write("\033[?25l\033[2J")  # hide cursor while we draw
@@ -159,17 +159,40 @@ def show(lrc, t0):
         time.sleep(0.05)
 
 
-def page(text, width, height):
-    height -= 1  # keep a line free so nothing scrolls off the top
-    text = [l.rstrip() for l in text if l.strip()]
-    colw = max(map(len, text), default=0) + 3
-    cols = [text[i:i + height] for i in range(0, len(text), height)]
-    fits = len(cols) * colw <= width
-    cols = cols if fits else cols[:max(1, width // colw)]  # too small: show what fits from the start
-    note = "" if fits else "(terminal too small for all the lyrics: make it bigger, or run cover-lyrics sync so they scroll)"
-    rows = ["".join(c[r].ljust(colw) if r < len(c) else "" for c in cols).rstrip()[:width]
-            for r in range(max(map(len, cols), default=0))]
-    return "\n".join(rows) + ("\n" + note[:width] if note else "")
+def page(text, width, height, title=""):
+    """Plain lyrics as one screen: verses kept whole, in the fewest balanced columns that fit, centred."""
+    verses = [v.splitlines() for v in re.split(r"\n\s*\n", "\n".join(l.rstrip() for l in text).strip()) if v.strip()]
+    room = max(1, height - 5)  # title + gap above, gap + footer below, one spare so nothing scrolls off the top
+    verses = [v[i:i + room] for v in verses for i in range(0, len(v), room)]  # a verse taller than the screen gets split
+    gap = 6
+
+    def pack(cap):  # verses in order into columns at most cap rows tall, a blank row between verses
+        cols = [[]]
+        for v in verses:
+            if cols[-1] and len(cols[-1]) + 1 + len(v) > cap:
+                cols.append([])
+            cols[-1] += ([""] if cols[-1] else []) + v
+        return cols
+
+    def wide(cols):
+        return sum(max(map(len, c)) for c in cols) + gap * (len(cols) - 1)
+
+    layouts = {}  # column count -> its most balanced (shortest) packing
+    for cap in range(max(map(len, verses), default=1), room + 1):
+        layouts.setdefault(len(pack(cap)), pack(cap))
+    fit = [cols for _, cols in sorted(layouts.items()) if wide(cols) <= width]
+    cols = fit[0] if fit else layouts[min(layouts)]
+    while len(cols) > 1 and wide(cols) > width:  # too small for all of it: show what fits from the start
+        cols = cols[:-1]
+    w = [max(map(len, c)) for c in cols]
+    left = " " * max(0, (width - wide(cols)) // 2)
+    block = [left + (" " * gap).join(c[r].ljust(w[i]) if r < len(c) else " " * w[i] for i, c in enumerate(cols)).rstrip()
+             for r in range(max(map(len, cols)))]
+    note = ("untimed lyrics: to make them scroll, press l in the menu (or run cover-lyrics sync)" if fit else
+            "too small for all the lyrics: enlarge the terminal, or time them so they scroll")
+    rows = [f"\033[1;93m{title.center(width).rstrip()[:width]}\033[0m", ""] + \
+           [f"\033[97m{b[:width]}\033[0m" for b in block] + ["", f"\033[2m{note.center(width).rstrip()[:width]}\033[0m"]
+    return "\n" * max(0, (height - 1 - len(rows)) // 2) + "\n".join(rows)
 
 
 def sync(track):
@@ -192,7 +215,23 @@ def sync(track):
     print(f"\nSaved {out}. Your next take of this song will scroll.")
 
 
+def selftest():
+    plain = lambda s: re.sub(r"\033\[[\d;]*m", "", s)
+    three = "a1\na2\na3\n\nb1\nb2\nb3\n\nc1\nc2\nc3".splitlines()
+    rows = [r.strip() for r in plain(page(three, 80, 30)).splitlines()]
+    assert "\n".join(rows).strip().split("\n\n")[:3] == ["a1\na2\na3", "b1\nb2\nb3", "c1\nc2\nc3"], \
+        "room for one column: one column, verses still separated"
+    rows = [r.strip() for r in plain(page(three, 80, 9)).splitlines()]   # 4 rows of room: one verse per column
+    assert ["a1      b1      c1", "a2      b2      c2", "a3      b3      c3"] == [r for r in rows if r.startswith("a")], \
+        "verses kept whole, side by side, in order"
+    long = [l and l + "-" * 50 for l in three]   # 3 verses side by side need ~170 columns
+    assert "too small" in page(long, 100, 9) and "c1" not in page(long, 100, 9), "doesn't fit: shows the start, says so"
+    print("selftest ok")
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--selftest"]:
+        sys.exit(selftest())
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         sys.exit(print(__doc__.strip()))
     {"fetch": fetch, "show": lambda f, t0: show(f, float(t0)), "sync": sync}[sys.argv[1]](*sys.argv[2:])

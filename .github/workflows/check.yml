@@ -15,3 +15,5 @@ jobs:
         run: ./test-cam-format.sh
       - name: TUI file rules and settings
         run: ./cover-tui --selftest
+      - name: Plain lyrics page layout
+        run: ./cover-lyrics --selftest
