@@ -31,8 +31,8 @@ Change distortion (or volume) on a cover you already made:
   named NAME-cover-TIME-remix-NOW, and -r works on those too.
 
 Lyrics (saved in ~/covers/lyrics, fetched from lrclib.net):
-  cover-lyrics sync SONG   tap Enter along with the song to time plain lyrics
-                           so they scroll (one time per song)
+  plain (untimed) lyrics are timed to the record's vocals on the first take;
+  cover-lyrics sync SONG   redo the timing by hand: tap Enter along with the song
 HELP
 }
 num() { [[ $2 =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "cover: $1 needs a number, got '$2' (see cover --help)" >&2; exit 2; }; }
@@ -128,7 +128,8 @@ if [[ -z $vox ]]; then
   fi
   lyr=~/covers/lyrics/$name.lrc   # fetched once; drop your own .lrc here to override
   [[ -f $lyr || -f ${lyr%.lrc}.txt ]] || cover-lyrics fetch "$track" "$lyr" "${inst%/*}/vocals.wav" || true
-  [[ -f $lyr ]] || lyr=${lyr%.lrc}.txt   # untimed lyrics show as a page until you run cover-lyrics sync
+  [[ -f $lyr || ! -f ${lyr%.lrc}.txt ]] || cover-lyrics time "${lyr%.lrc}.txt" "${inst%/*}/vocals.wav" || true
+  [[ -f $lyr ]] || lyr=${lyr%.lrc}.txt   # still untimed: shown as a page
   echo "Headphones on. Starting in 3s. Ctrl+C cancels and deletes the take."; sleep 3   # also covers the ~1s camera startup
   t0=$EPOCHREALTIME
   # 128-sample buffers (2.7ms) instead of pw-cat's 100ms default: near-zero lag, only while recording

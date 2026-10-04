@@ -4,10 +4,13 @@
                                          look the song up on lrclib.net, save timed lyrics (with the song's
                                          isolated vocals, pick the version whose timing matches the singing)
   cover-lyrics show <file.lrc> <t0>      scroll them karaoke-style, t0 = epoch time the song started
+  cover-lyrics time <name.txt> <vocals.wav>
+                                         time plain lyrics against the song's isolated vocals -> <name>.lrc
   cover-lyrics sync <track>              tap Enter along with the song to turn plain lyrics into a timed .lrc
-Only plain lyrics online -> fetch saves <name>.txt, show prints it as a page, sync times it once.
+Only plain lyrics online -> fetch saves <name>.txt, cover times it once with `time` (or show prints it as a page),
+sync redoes the timing by hand.
 """
-import array, bisect, json, math, os, re, shlex, shutil, signal, subprocess, sys, textwrap, time, urllib.parse, urllib.request
+import array, bisect, json, math, os, re, shlex, shutil, signal, subprocess, sys, textwrap, time, unicodedata, urllib.parse, urllib.request
 from pathlib import Path
 
 
@@ -195,6 +198,51 @@ def page(text, width, height, title=""):
     return "\n" * max(0, (height - 1 - len(rows)) // 2) + "\n".join(rows)
 
 
+def autotime(txt, vocals):
+    """Time plain lyrics by forced alignment: torchaudio's MMS aligner finds where each known word is sung in the
+    song's isolated vocal (demucs' stem). Kept only if the aligner is sure enough of the words; else the page stays."""
+    try:
+        import warnings; warnings.filterwarnings("ignore")  # torchaudio's deprecation notices
+        import torch, torchaudio
+        from torchaudio.pipelines import MMS_FA
+    except ImportError:  # torch lives in demucs' own environment (uv tool / pipx): run there
+        py = Path(shutil.which("demucs") or "demucs").resolve().parent / "python"
+        if os.environ.get("COVER_IN_DEMUCS") or not py.exists():
+            return print("Can't time the lyrics: needs demucs' torchaudio (see README). They'll show as a page.")
+        return subprocess.call([str(py), os.path.realpath(__file__), "time", txt, vocals], env={**os.environ, "COVER_IN_DEMUCS": "1"})
+    txt = Path(txt)
+    lines = [l.strip() for l in txt.read_text().splitlines() if l.strip()]
+    ascii_ = lambda l: unicodedata.normalize("NFKD", l).encode("ascii", "ignore").decode().lower()
+    words = [re.sub(r"[^a-z']+", " ", ascii_(l)).split() for l in lines]  # the aligner knows a-z and ' only
+    if not any(words):
+        return print("No words in the lyrics to time.")
+    print("Timing the lyrics to the record's vocals (once per song; the first time downloads a 1.2 GB model)...", flush=True)
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    wav, sr = torchaudio.load(vocals)
+    wav = torchaudio.functional.resample(wav.mean(0, keepdim=True), sr, MMS_FA.sample_rate).to(dev)
+    model, step = MMS_FA.get_model().to(dev), 30 * MMS_FA.sample_rate
+    with torch.inference_mode():  # 30 s at a time keeps memory flat on long songs
+        em = torch.cat([model(wav[:, i:i + step])[0] for i in range(0, wav.size(1), step)], dim=1)
+    flat = [w for ws in words for w in ws]
+    try:
+        spans = MMS_FA.get_aligner()(em[0], MMS_FA.get_tokenizer()(flat))
+    except RuntimeError:  # more words than this recording can hold (lyrics of a longer version)
+        return print("Couldn't time the lyrics: they don't fit this recording, so they'll show as a page.")
+    sec, k, lrc = wav.size(1) / em.size(1) / MMS_FA.sample_rate, 0, ""
+    for ws, line in zip(words, lines):
+        t = spans[min(k, len(spans) - 1)][0].start * sec  # a line with no words (e.g. "666") takes the next word's time
+        lrc += f"[{int(t // 60):02d}:{t % 60:05.2f}]{line}\n"
+        k += len(ws)
+    sure = sorted(s.score for ws in spans for s in ws)
+    sure = sure[len(sure) // 2]  # median confidence per sound (letter)
+    # ponytail: fixed bar from 8 songs: usable timing scored 0.07-0.2, a 35 s-off failure 0.026. Retried each take.
+    if sure < 0.05:
+        return print(f"Couldn't time the lyrics reliably (confidence {sure:.2f}), so they'll show as a page. "
+                     f"To time them by hand: press l in the menu, or cover-lyrics sync.")
+    txt.with_suffix(".lrc").write_text(lrc)  # the .txt stays: the menu's l re-times by hand from it
+    print(f"Lyrics timed (confidence {sure:.2f}). If a line is off, fix its time in {txt.with_suffix('.lrc')}")
+
+
 def sync(track):
     track = Path(track).resolve()
     txt = Path.home() / "covers/lyrics" / (track.stem + ".txt")
@@ -234,4 +282,4 @@ if __name__ == "__main__":
         sys.exit(selftest())
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         sys.exit(print(__doc__.strip()))
-    {"fetch": fetch, "show": lambda f, t0: show(f, float(t0)), "sync": sync}[sys.argv[1]](*sys.argv[2:])
+    {"fetch": fetch, "show": lambda f, t0: show(f, float(t0)), "time": autotime, "sync": sync}[sys.argv[1]](*sys.argv[2:])
