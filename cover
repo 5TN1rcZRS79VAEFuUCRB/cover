@@ -197,17 +197,16 @@ shape() {  # level of each octave band relative to the whole signal, all in one 
 reflufs=$(lufs "$ref")
 ffmpeg -loglevel error -y -i "$vox" -af "highpass=f=80,acompressor=threshold=-20dB:ratio=4:attack=5:release=80:makeup=2" "$vclean"
 # Tone: EQ your clean vocal toward the record's vocal, band by band, before distortion so --dist keeps its character.
-# A second pass after distortion fixes what's left (octave filters overlap, distortion thins lows and air).
+# Two more passes after distortion fix what's left: its 1.5k bite (+7 dB too much at 2k on Pierced from Within,
+# whose singer is scooped there), thinned lows and air, and the octave filters' overlap. --dist keeps its grit.
 # ponytail: 75% per pass, capped; demucs' vocal stem has some cymbal/guitar bleed a full match would copy.
 eq=
 if awk -v l="$reflufs" 'BEGIN{exit !(l > -40)}'; then   # skip for instrumentals: nothing to match
   refshape=$(shape "$ref")
-  toward() {  # EQ moving $1's tone 75% toward the record's vocal, max $2 dB per band (+3 more for the 8k+ air);
-              # $3 = "keepbite" leaves 1-4 kHz alone
-    awk -v r="$refshape" -v m="$(shape "$1")" -v b="${bands[*]}" -v c="$2" -v k="${3-}" 'BEGIN{
+  toward() {  # EQ moving $1's tone 75% toward the record's vocal, max $2 dB per band (+3 more for the 8k+ air)
+    awk -v r="$refshape" -v m="$(shape "$1")" -v b="${bands[*]}" -v c="$2" 'BEGIN{
       n = split(r, R); split(m, M); split(b, B)
       for (i = 1; i <= n; i++) { hi = B[i] >= 8000 ? c + 3 : c; g = 0.75 * (R[i] - M[i]); g = g > hi ? hi : (g < -c ? -c : g)
-        if (k == "keepbite" && B[i] >= 1000 && B[i] <= 4000) g = 0
         printf "equalizer=f=%s:t=o:w=1:g=%.1f,", B[i], g } }'
   }
   eq=$(toward "$vclean" 9)
@@ -222,8 +221,8 @@ if awk -v d="$dist" 'BEGIN{exit !(d>0)}'; then
    [d][x]amix=inputs=2:weights='$dry $wet':normalize=0"
 fi
 ffmpeg -loglevel error -y -i "$vclean" -filter_complex "${chain}[o]" -map "[o]" "$vdry"
-if [[ -n $eq ]]; then  # second pass: restore lows and air, keep the 1-4 kHz bite --dist added
-  ffmpeg -loglevel error -y -i "$vdry" -af "$(toward "$vdry" 6 keepbite)anull" "$vbus" && mv "$vbus" "$vdry"
+if [[ -n $eq ]]; then
+  for _ in 1 2; do ffmpeg -loglevel error -y -i "$vdry" -af "$(toward "$vdry" 6)anull" "$vbus" && mv "$vbus" "$vdry"; done
 fi
 # Space: stereo room reverb (decaying noise as the impulse response, different per side = width), set so your
 # vocal is as wide as the record's. Dry mono vocals sound pasted on top of the band.
@@ -291,9 +290,8 @@ if ((measured)); then
   mywidth=$(width "$d/vocals.wav")
   [[ -n ${refshape-} ]] || refshape=$(shape "$ref")
   tone=$(awk -v r="$refshape" -v m="$(shape "$d/vocals.wav")" -v b="${bands[*]}" 'BEGIN{ n = split(r, R); split(m, M); split(b, B)
-    for (i = 1; i <= n; i++) { x = M[i] - R[i]; printf "%s:%+.1f ", (B[i] >= 1000 ? B[i] / 1000 "k" : B[i]), x
-      if (B[i] < 1000 || B[i] > 4000) { t += x < 0 ? -x : x; k++ } }   # average leaves out the 1-4k --dist bite
-    printf "|%.1f", k ? t / k : 0 }')
+    for (i = 1; i <= n; i++) { x = M[i] - R[i]; printf "%s:%+.1f ", (B[i] >= 1000 ? B[i] / 1000 "k" : B[i]), x; t += x < 0 ? -x : x }
+    printf "|%.1f", t / n }')
   if awk -v c="$corr" 'BEGIN{exit !(c > 0.3 || c < -0.3)}'; then
     echo "  vocal was $(awk -v c="$corr" 'BEGIN{printf "%.1f dB too %s", (c < 0 ? -c : c), (c > 0 ? "quiet" : "loud")}'), fixing"
     gain=$(awk -v g="$gain" -v c="$corr" 'BEGIN{print g + c}'); mix

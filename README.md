@@ -10,8 +10,8 @@ Built for death metal covers, but nothing in it is genre-specific except the def
 - **A count-in**: four clicks before the song starts, so songs that open at full speed don't catch you cold (the lyrics count down with them; the clicks aren't in the take).
 - **Webcam video**, lined up with the audio, shrunk on the GPU (NVENC) right after the take.
 - **Scrolling synced lyrics** from [LRCLIB](https://lrclib.net), with a countdown into each vocal entry. Songs with only plain lyrics are timed automatically on the first take, by lining the words up with the record's own vocal (torchaudio's forced aligner, which comes with Demucs; a 1.2 GB model is downloaded the first time). If that doesn't fit well enough they show as a page, and you can time them by hand with a tap-along (`l` in the menu app, or `cover-lyrics sync`).
-- **Sounds like the record.** Your vocal is matched to the band's own isolated vocal: tone (EQ, two passes), width (stereo doubles + room reverb), level, and the whole mix to the record's loudness. After mixing, it splits its own result with Demucs and corrects the vocal level against the record measured the same way.
-- **Distortion** from 0 (clean) to 10 (fully distorted), level-matched so it changes tone, not volume.
+- **Sounds like the record.** Your vocal is matched to the band's own isolated vocal: tone (EQ, before and after distortion), width (stereo doubles + room reverb), level, and the whole mix to the record's loudness. After mixing, it splits its own result with Demucs and corrects the vocal level against the record measured the same way.
+- **Distortion** from 0 (clean) to 10 (fully distorted), level-matched so it changes grit, not volume, and tone-matched to the record afterwards.
 - **Remix any take** with new settings without singing it again.
 - **Grades** every take against the record (vocal level, width, tone) and saves it.
 - **A terminal UI**: run `cover` with no arguments.
